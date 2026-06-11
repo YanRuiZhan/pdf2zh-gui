@@ -527,6 +527,7 @@ class ServiceDialog(ctk.CTkToplevel):
 
         f = master.f_body
         self._rows: list[tuple] = []
+        self._model_menus: dict[str, ctk.CTkOptionMenu] = {}
 
         ctk.CTkLabel(self, text="服务类型", font=master.f_section, text_color=INK).pack(
             anchor="w", padx=20, pady=(18, 4)
@@ -665,7 +666,7 @@ class ServiceDialog(ctk.CTkToplevel):
         try:
             models = fetch_models(stype, envs)
             self._after_safe(lambda: self._set_err(
-                f"✅ 找到 {len(models)} 个模型，已填入 {models[0]}", COLOR_OK
+                f"✅ 找到 {len(models)} 个模型，已更新模型下拉菜单", COLOR_OK
             ))
             self._after_safe(lambda: self._fill_model(models))
         except Exception as e:
@@ -674,17 +675,23 @@ class ServiceDialog(ctk.CTkToplevel):
             self._after_safe(lambda: self._toggle_buttons(True))
 
     def _fill_model(self, models: list[str]):
-        """Put first model into the model-name entry if it's empty or default."""
+        """Refresh model dropdowns and put a useful default in empty entries."""
         schema = SERVICE_SCHEMAS[TYPE_LABEL_TO_KEY[self.type_var.get()]]
         model_keys = {k for k, *_ in schema if k.endswith("_MODEL")}
+        defaults = {k: default for k, _label, _required, _secret, default in schema}
         if not models:
             return
         for env_key, entry, _required in self._rows:
             if env_key in model_keys:
+                menu = self._model_menus.get(env_key)
                 cur = entry.get().strip()
-                if not cur or cur == dict(schema).get(env_key, ""):
-                    entry.delete(0, "end")
-                    entry.insert(0, models[0])
+                if menu:
+                    menu.configure(values=models, state="normal")
+                    menu.set(cur if cur in models else "选择模型")
+                if not cur or cur == defaults.get(env_key, ""):
+                    self._set_model_entry(entry, models[0])
+                    if menu:
+                        menu.set(models[0])
 
     def _toggle_buttons(self, enabled):
         state = "normal" if enabled else "disabled"
@@ -704,6 +711,7 @@ class ServiceDialog(ctk.CTkToplevel):
         for w in self.fields_frame.winfo_children():
             w.destroy()
         self._rows.clear()
+        self._model_menus.clear()
         key = TYPE_LABEL_TO_KEY[self.type_var.get()]
         saved = self.profile.get("envs", {})
         for env_key, label, required, secret, default in SERVICE_SCHEMAS[key]:
@@ -727,7 +735,28 @@ class ServiceDialog(ctk.CTkToplevel):
                 )
                 btn.configure(command=lambda e=entry, b=btn: self._toggle(e, b))
                 btn.pack(side="left", padx=(6, 0))
+            elif env_key.endswith("_MODEL"):
+                menu = ctk.CTkOptionMenu(
+                    row, values=["选择模型"], width=92, height=28,
+                    fg_color=WHITE, text_color=SLATE, font=self.master_ref.f_small,
+                    button_color="#E7E2D5", button_hover_color="#D9D3C3",
+                    dropdown_fg_color=WHITE, dropdown_text_color=INK,
+                    dropdown_hover_color=IVORY, dropdown_font=self.master_ref.f_body,
+                    corner_radius=6,
+                    command=lambda value, e=entry: self._set_model_entry(e, value),
+                )
+                menu.set("选择模型")
+                menu.configure(state="disabled")
+                menu.pack(side="left", padx=(6, 0))
+                self._model_menus[env_key] = menu
             self._rows.append((env_key, entry, required))
+
+    @staticmethod
+    def _set_model_entry(entry, value):
+        if value == "选择模型":
+            return
+        entry.delete(0, "end")
+        entry.insert(0, value)
 
     @staticmethod
     def _toggle(entry, btn):
