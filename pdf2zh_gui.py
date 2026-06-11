@@ -23,6 +23,7 @@ if sys.stderr is None:
 import tkinter.font as tkfont
 import customtkinter as ctk
 from tkinter import filedialog
+from customtkinter.windows.widgets.core_widget_classes import DropdownMenu
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 APP_ICON_PATH = Path(__file__).with_name("pdf_translate_icon_120.ico")
@@ -38,6 +39,11 @@ LANGS = {
     "Deutsch": "de",
     "Español": "es",
     "Русский": "ru",
+}
+OUTPUT_MODES = {
+    "双语 + 中文": "both",
+    "仅双语": "dual",
+    "仅中文": "mono",
 }
 KEYLESS_SERVICES = ("google", "bing")
 
@@ -512,6 +518,98 @@ class FastScrollFrame(ctk.CTkScrollableFrame):
             super()._mouse_wheel_all(event)
 
 
+class PrettyOptionMenu(ctk.CTkFrame):
+    """Segmented option menu with a cleaner chevron button."""
+
+    def __init__(
+        self, master, variable, values, width, height=30, font=None,
+        command=None, state="normal",
+    ):
+        super().__init__(
+            master, width=width, height=height, fg_color=WHITE,
+            corner_radius=8, border_width=1, border_color=LINE,
+        )
+        self.pack_propagate(False)
+        self.grid_propagate(False)
+        self._variable = variable
+        self._values = list(values)
+        self._command = command
+        self._state = state
+        self._trace_blocked = False
+        self._trace_name = None
+        self._arrow_width = min(42, max(30, height + 10))
+        self._current_value = variable.get() if variable is not None else (
+            self._values[0] if self._values else ""
+        )
+
+        self._dropdown = DropdownMenu(
+            master=self, values=self._values, command=self._select,
+            fg_color=WHITE, hover_color=IVORY, text_color=INK, font=font,
+        )
+        self._text_btn = ctk.CTkButton(
+            self, text=self._current_value, height=height - 2,
+            fg_color=WHITE, hover_color=GHOST_H, text_color=INK,
+            font=font, border_width=0, corner_radius=7,
+            command=self._open,
+        )
+        self._text_btn.pack(side="left", fill="both", expand=True, padx=(1, 0), pady=1)
+        self._arrow_btn = ctk.CTkButton(
+            self, text="⌄", width=self._arrow_width, height=height - 2,
+            fg_color="#E7E2D5", hover_color="#D9D3C3", text_color=INK,
+            font=ctk.CTkFont(size=17, weight="bold"),
+            border_width=0, corner_radius=7, command=self._open,
+        )
+        self._arrow_btn.pack(side="left", fill="y", padx=(0, 1), pady=1)
+        if variable is not None:
+            self._trace_name = variable.trace_add("write", self._sync_from_var)
+        self.configure(state=state)
+
+    def destroy(self):
+        if self._variable is not None and self._trace_name:
+            self._variable.trace_remove("write", self._trace_name)
+        super().destroy()
+
+    def configure(self, **kwargs):
+        if not hasattr(self, "_dropdown"):
+            return super().configure(**kwargs)
+        values = kwargs.pop("values", None)
+        state = kwargs.pop("state", None)
+        if values is not None:
+            self._values = list(values)
+            self._dropdown.configure(values=self._values)
+        super().configure(**kwargs)
+        if state is not None:
+            self._state = state
+            btn_state = "normal" if state != "disabled" else "disabled"
+            self._text_btn.configure(state=btn_state)
+            self._arrow_btn.configure(state=btn_state)
+
+    def set(self, value):
+        self._current_value = value
+        self._text_btn.configure(text=value)
+        if self._variable is not None and self._variable.get() != value:
+            self._trace_blocked = True
+            self._variable.set(value)
+            self._trace_blocked = False
+
+    def get(self):
+        return self._current_value
+
+    def _sync_from_var(self, *_):
+        if not self._trace_blocked and self._variable is not None:
+            self.set(self._variable.get())
+
+    def _open(self):
+        if self._state == "disabled":
+            return
+        self._dropdown.open(self.winfo_rootx(), self.winfo_rooty() + self.winfo_height())
+
+    def _select(self, value):
+        self.set(value)
+        if self._command:
+            self._command(value)
+
+
 class ServiceDialog(ctk.CTkToplevel):
     """Add / edit an AI translation service profile."""
 
@@ -527,7 +625,7 @@ class ServiceDialog(ctk.CTkToplevel):
 
         f = master.f_body
         self._rows: list[tuple] = []
-        self._model_menus: dict[str, ctk.CTkOptionMenu] = {}
+        self._model_menus: dict[str, PrettyOptionMenu] = {}
 
         ctk.CTkLabel(self, text="服务类型", font=master.f_section, text_color=INK).pack(
             anchor="w", padx=20, pady=(18, 4)
@@ -736,13 +834,10 @@ class ServiceDialog(ctk.CTkToplevel):
                 btn.configure(command=lambda e=entry, b=btn: self._toggle(e, b))
                 btn.pack(side="left", padx=(6, 0))
             elif env_key.endswith("_MODEL"):
-                menu = ctk.CTkOptionMenu(
-                    row, values=["选择模型"], width=92, height=28,
-                    fg_color=WHITE, text_color=SLATE, font=self.master_ref.f_small,
-                    button_color="#E7E2D5", button_hover_color="#D9D3C3",
-                    dropdown_fg_color=WHITE, dropdown_text_color=INK,
-                    dropdown_hover_color=IVORY, dropdown_font=self.master_ref.f_body,
-                    corner_radius=6,
+                menu = PrettyOptionMenu(
+                    row, variable=ctk.StringVar(value="选择模型"),
+                    values=["选择模型"], width=104, height=30,
+                    font=self.master_ref.f_small,
                     command=lambda value, e=entry: self._set_model_entry(e, value),
                 )
                 menu.set("选择模型")
@@ -963,14 +1058,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         )
 
     def _menu(self, parent, var, values, width):
-        return ctk.CTkOptionMenu(
-            parent, variable=var, values=values, width=width, height=30,
-            fg_color=WHITE, text_color=INK, font=self.f_body,
-            button_color="#E7E2D5", button_hover_color="#D9D3C3",
-            dropdown_fg_color=WHITE, dropdown_text_color=INK,
-            dropdown_hover_color=IVORY, dropdown_font=self.f_body,
-            corner_radius=8,
-        )
+        return PrettyOptionMenu(parent, var, values, width, font=self.f_body)
 
     def _label(self, parent, text):
         return ctk.CTkLabel(parent, text=text, font=self.f_body, text_color=SLATE)
@@ -1085,6 +1173,13 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             fg_color=CLAY, hover_color=CLAY_DK, checkmark_color=WHITE,
             border_color="#B9B3A5", border_width=2, corner_radius=6,
         ).grid(row=3, column=2, columnspan=2, padx=12, pady=(2, 10), sticky="w")
+        self._label(opt, "输出文件").grid(
+            row=3, column=4, padx=(12, 4), pady=(2, 10), sticky="e"
+        )
+        self.output_mode_var = ctk.StringVar(value="双语 + 中文")
+        self._menu(opt, self.output_mode_var, list(OUTPUT_MODES), 132).grid(
+            row=3, column=5, padx=(4, 14), pady=(2, 10), sticky="w"
+        )
 
         # output card
         out = self._card()
@@ -1252,6 +1347,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             "envs": envs,
             "thread": int(self.thread_var.get()),
             "output": output,
+            "output_mode": OUTPUT_MODES[self.output_mode_var.get()],
             "ignore_cache": self.cache_var.get(),
         }
         files = list(self._files)
@@ -1283,6 +1379,27 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             except OSError:
                 self._log(f"无法打开目录：{d}")
 
+    @staticmethod
+    def _write_selected_outputs(out_dir, filename, mono_bytes, dual_bytes, output_mode):
+        outputs = {
+            "mono": (f"{filename}-mono.pdf", mono_bytes, "中文"),
+            "dual": (f"{filename}-dual.pdf", dual_bytes, "双语"),
+        }
+        keep_keys = {
+            "both": ("dual", "mono"),
+            "dual": ("dual",),
+            "mono": ("mono",),
+        }.get(output_mode, ("dual", "mono"))
+
+        kept = []
+        for key in keep_keys:
+            name, data, label = outputs[key]
+            path = out_dir / name
+            with open(path, "wb") as out_pdf:
+                out_pdf.write(data)
+            kept.append((path, label))
+        return kept
+
     # ---------- worker (background thread) ----------
     def _worker(self, files, params, cancel):
         q = self._q
@@ -1291,7 +1408,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             import asyncio
             patch_pdf2zh_runtime()
             from pdf2zh.doclayout import OnnxModel
-            from pdf2zh.high_level import translate
+            from pdf2zh.high_level import translate_stream
 
             if App._model is None:
                 App._model = OnnxModel.load_available()
@@ -1313,9 +1430,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     q.put(("page", done, total, _f, _i, _n))
 
                 try:
-                    res = translate(
-                        files=[f],
-                        output=str(out_dir),
+                    s_raw = Path(f).read_bytes()
+                    s_mono, s_dual = translate_stream(
+                        s_raw,
                         pages=params["pages"],
                         lang_in=params["lang_in"],
                         lang_out=params["lang_out"],
@@ -1327,9 +1444,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                         model=App._model,
                         ignore_cache=params["ignore_cache"],
                     )
-                    mono, dual = res[0]
+                    kept = self._write_selected_outputs(
+                        out_dir, Path(f).stem, s_mono, s_dual, params["output_mode"]
+                    )
+                    kept_text = " / ".join(
+                        f"{path.name}（{label}）" for path, label in kept
+                    )
                     q.put(("file_status", f, "完成", COLOR_OK))
-                    q.put(("log", f"完成：{Path(dual).name}（双语）/ {Path(mono).name}（纯译文）"))
+                    q.put(("log", f"完成：{kept_text}"))
                     q.put(("done_dir", str(out_dir)))
                 except asyncio.CancelledError:
                     q.put(("file_status", f, "已取消", COLOR_FAIL))

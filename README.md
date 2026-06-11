@@ -7,7 +7,7 @@
 ## 功能
 
 - 拖拽或选择多个 PDF 文件
-- 支持页码范围、输出目录和并发线程设置
+- 支持页码范围、输出目录、输出文件类型和并发线程设置
 - 支持 OpenAI 兼容、Claude/Anthropic 兼容、DeepSeek、Gemini、智谱、SiliconFlow、Grok、Groq、Ollama、Azure OpenAI 等服务
 - 支持 LongCat 这类 Anthropic-compatible `/messages` 网关
 - 自动创建桌面快捷方式
