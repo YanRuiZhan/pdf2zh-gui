@@ -1,0 +1,1382 @@
+# -*- coding: utf-8 -*-
+"""pdf2zh desktop GUI - translate PDFs without a server. Anthropic-flavored UI."""
+import json
+import logging
+import os
+import queue
+import re
+import sys
+import threading
+import traceback
+from pathlib import Path
+from urllib.parse import urlsplit
+
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+# pythonw.exe has no std streams; tqdm/onnxruntime would crash on None
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+import tkinter.font as tkfont
+import customtkinter as ctk
+from tkinter import filedialog
+from tkinterdnd2 import DND_FILES, TkinterDnD
+
+APP_ICON_PATH = Path(__file__).with_name("pdf_translate_icon_120.ico")
+CONFIG_PATH = Path.home() / ".config" / "PDFMathTranslate" / "config.json"
+
+LANGS = {
+    "English": "en",
+    "简体中文": "zh",
+    "繁體中文": "zh-TW",
+    "日本語": "ja",
+    "한국어": "ko",
+    "Français": "fr",
+    "Deutsch": "de",
+    "Español": "es",
+    "Русский": "ru",
+}
+KEYLESS_SERVICES = ("google", "bing")
+
+# (env_key, label, required, secret, default)
+SERVICE_SCHEMAS = {
+    "openailiked": [
+        ("OPENAILIKED_BASE_URL", "Base URL", True, False, "https://"),
+        ("OPENAILIKED_API_KEY", "API Key", False, True, ""),
+        ("OPENAILIKED_MODEL", "模型名称", True, False, ""),
+    ],
+    "anthropic": [
+        ("OPENAILIKED_BASE_URL", "Base URL", True, False, "https://api.anthropic.com/v1/"),
+        ("OPENAILIKED_API_KEY", "API Key", True, True, ""),
+        ("OPENAILIKED_MODEL", "模型名称", True, False, "claude-sonnet-4-6"),
+    ],
+    "claudeliked": [
+        ("OPENAILIKED_BASE_URL", "Base URL", True, False, "https://"),
+        ("OPENAILIKED_API_KEY", "API Key", False, True, ""),
+        ("OPENAILIKED_MODEL", "模型名称", True, False, "claude-3-5-sonnet-20241022"),
+    ],
+    "openai": [
+        ("OPENAI_BASE_URL", "Base URL", False, False, "https://api.openai.com/v1"),
+        ("OPENAI_API_KEY", "API Key", True, True, ""),
+        ("OPENAI_MODEL", "模型名称", False, False, "gpt-4o-mini"),
+    ],
+    "deepseek": [
+        ("DEEPSEEK_API_KEY", "API Key", True, True, ""),
+        ("DEEPSEEK_MODEL", "模型名称", False, False, "deepseek-chat"),
+    ],
+    "gemini": [
+        ("GEMINI_API_KEY", "API Key", True, True, ""),
+        ("GEMINI_MODEL", "模型名称", False, False, "gemini-1.5-flash"),
+    ],
+    "zhipu": [
+        ("ZHIPU_API_KEY", "API Key", True, True, ""),
+        ("ZHIPU_MODEL", "模型名称", False, False, "glm-4-flash"),
+    ],
+    "silicon": [
+        ("SILICON_API_KEY", "API Key", True, True, ""),
+        ("SILICON_MODEL", "模型名称", False, False, "Qwen/Qwen2.5-7B-Instruct"),
+    ],
+    "grok": [
+        ("GROK_API_KEY", "API Key", True, True, ""),
+        ("GROK_MODEL", "模型名称", False, False, "grok-2-1212"),
+    ],
+    "groq": [
+        ("GROQ_API_KEY", "API Key", True, True, ""),
+        ("GROQ_MODEL", "模型名称", False, False, "llama-3-3-70b-versatile"),
+    ],
+    "ollama": [
+        ("OLLAMA_HOST", "服务地址", False, False, "http://127.0.0.1:11434"),
+        ("OLLAMA_MODEL", "模型名称", True, False, "gemma2"),
+    ],
+    "azure-openai": [
+        ("AZURE_OPENAI_BASE_URL", "Base URL", True, False, "https://xxx.openai.azure.com"),
+        ("AZURE_OPENAI_API_KEY", "API Key", True, True, ""),
+        ("AZURE_OPENAI_MODEL", "部署/模型名", False, False, "gpt-4o-mini"),
+        ("AZURE_OPENAI_API_VERSION", "API 版本", False, False, "2024-06-01"),
+    ],
+}
+SERVICE_TYPE_LABELS = {
+    "openailiked": "自定义 · OpenAI 兼容",
+    "anthropic": "Anthropic Claude",
+    "claudeliked": "Claude 兼容",
+    "openai": "OpenAI",
+    "deepseek": "DeepSeek",
+    "gemini": "Google Gemini",
+    "zhipu": "智谱 GLM",
+    "silicon": "硅基流动 SiliconFlow",
+    "grok": "xAI Grok",
+    "groq": "Groq",
+    "ollama": "Ollama 本地",
+    "azure-openai": "Azure OpenAI",
+}
+TYPE_LABEL_TO_KEY = {v: k for k, v in SERVICE_TYPE_LABELS.items()}
+
+# GUI type -> pdf2zh service name (anthropic rides the OpenAI-compatible channel)
+SERVICE_BACKEND = {"anthropic": "openailiked", "claudeliked": "openailiked"}
+
+# fixed REST bases for providers whose translator hardcodes the URL
+PROVIDER_FIXED_BASE = {
+    "deepseek": "https://api.deepseek.com/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "silicon": "https://api.siliconflow.cn/v1",
+    "grok": "https://api.x.ai/v1",
+    "groq": "https://api.groq.com/openai/v1",
+}
+
+# Services where we smart-complete the base URL (openailiked-style)
+_BASE_SUFFIX_HINTS = {"openailiked": "/v1", "anthropic": "/v1", "claudeliked": "/v1"}
+
+
+def _normalize_base_url(raw: str, stype: str = "openailiked") -> str:
+    """Smart-complete partial URLs to the correct chat-completion root.
+
+    Handles:
+      "https://api.anthropic.com"       → "https://api.anthropic.com/v1"
+      "https://api.anthropic.com/"      → "https://api.anthropic.com/v1"
+      "https://api.anthropic.com/v1"    → "https://api.anthropic.com/v1"
+      "http://localhost:8000"           → "http://localhost:8000/v1"
+    """
+    url = raw.strip().rstrip("/")
+    if not url:
+        return raw.strip()
+    if stype in _BASE_SUFFIX_HINTS:
+        suffix = _BASE_SUFFIX_HINTS[stype]
+        # Only inspect the URL path. Domains such as api.longcat.chat should
+        # not count as an existing /api segment.
+        path = urlsplit(url).path.rstrip("/")
+        for pat in ("/v1", "/v2", "/api", "/v1beta"):
+            if path == pat or path.startswith(pat + "/") or path.endswith(pat):
+                return url
+        return url + suffix
+    if stype in PROVIDER_FIXED_BASE and "/" not in url.split("://")[1]:
+        return PROVIDER_FIXED_BASE[stype]
+    return url
+
+
+def _api_target(stype: str, envs: dict):
+    """-> (base_url, headers) for direct REST calls (test / list models)."""
+    def need(key, label):
+        v = (envs.get(key) or "").strip()
+        if not v:
+            raise ValueError(f"请先填写 {label}")
+        return v
+
+    if stype == "ollama":
+        base = (envs.get("OLLAMA_HOST") or "http://127.0.0.1:11434").strip()
+        return base.rstrip("/"), {}
+    if stype == "azure-openai":
+        return (
+            need("AZURE_OPENAI_BASE_URL", "Base URL").rstrip("/"),
+            {"api-key": need("AZURE_OPENAI_API_KEY", "API Key")},
+        )
+    if stype in ("openailiked", "anthropic", "claudeliked"):
+        raw = need("OPENAILIKED_BASE_URL", "Base URL")
+        base = _normalize_base_url(raw, stype).rstrip("/")
+        key = (envs.get("OPENAILIKED_API_KEY") or "").strip()
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        if stype in ("anthropic", "claudeliked") or "anthropic.com" in base or "/anthropic" in base:
+            if not key:
+                raise ValueError("请先填写 API Key")
+            headers["x-api-key"] = key
+            headers["anthropic-version"] = "2023-06-01"
+        return base, headers
+    base = (
+        PROVIDER_FIXED_BASE.get(stype)
+        or (envs.get("OPENAI_BASE_URL") or "").strip()
+        or "https://api.openai.com/v1"
+    ).rstrip("/")
+    key = need(f"{stype.upper().replace('-', '_')}_API_KEY", "API Key")
+    return base, {"Authorization": f"Bearer {key}"}
+
+
+_PROXY = "http://127.0.0.1:10808"  # socks5h too; use http for Windows compat
+
+
+def patch_pdf2zh_runtime():
+    """Runtime compatibility patches kept local to this desktop GUI."""
+    try:
+        import requests
+        from pdf2zh import pdfinterp, translator
+    except Exception:
+        return
+
+    cls = getattr(translator, "OpenAITranslator", None)
+    if cls is not None and not getattr(cls, "_pdf2zh_gui_messages_patch", False):
+        orig_init = cls.__init__
+        orig_do_translate = cls.do_translate
+
+        def patched_init(
+            self, lang_in, lang_out, model, base_url=None, api_key=None,
+            envs=None, prompt=None, ignore_cache=False,
+        ):
+            orig_init(
+                self, lang_in, lang_out, model, base_url=base_url,
+                api_key=api_key, envs=envs, prompt=prompt,
+                ignore_cache=ignore_cache,
+            )
+            raw_base = (
+                base_url
+                or getattr(self, "_base_url", "")
+                or getattr(self, "envs", {}).get("OPENAI_BASE_URL")
+                or getattr(self, "envs", {}).get("OPENAILIKED_BASE_URL")
+                or ""
+            )
+            raw_key = (
+                api_key
+                or getattr(self, "_api_key", "")
+                or getattr(self, "envs", {}).get("OPENAI_API_KEY")
+                or getattr(self, "envs", {}).get("OPENAILIKED_API_KEY")
+                or ""
+            )
+            self._pdf2zh_gui_base_url = str(raw_base).rstrip("/")
+            self._pdf2zh_gui_api_key = str(raw_key)
+            self._pdf2zh_gui_use_messages = bool(
+                self._pdf2zh_gui_base_url
+                and (
+                    "/anthropic" in self._pdf2zh_gui_base_url
+                    or "anthropic.com" in self._pdf2zh_gui_base_url
+                )
+            )
+
+        def native_messages_translate(self, text):
+            key = getattr(self, "_pdf2zh_gui_api_key", "")
+            base = getattr(self, "_pdf2zh_gui_base_url", "").rstrip("/")
+            payload = {
+                "model": self.model,
+                "max_tokens": 4096,
+                "temperature": getattr(self, "options", {}).get("temperature", 0),
+                "messages": self.prompt(text, getattr(self, "prompttext", None)),
+            }
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            resp = requests.post(
+                f"{base}/messages", headers=headers, json=payload,
+                timeout=(15, 120),
+            )
+            try:
+                resp.raise_for_status()
+            except requests.HTTPError as exc:
+                raise ValueError(
+                    f"HTTP {resp.status_code} from Anthropic-compatible service: "
+                    f"{resp.text[:500]}"
+                ) from exc
+            data = resp.json()
+            parts = data.get("content") or []
+            if isinstance(parts, str):
+                content = parts.strip()
+            else:
+                content = "".join(
+                    p.get("text", "") if isinstance(p, dict) else str(p)
+                    for p in parts
+                ).strip()
+            if not content:
+                raise ValueError("Empty response from Anthropic-compatible service")
+            regex = getattr(self, "think_filter_regex", None)
+            return regex.sub("", content).strip() if regex else content
+
+        def patched_do_translate(self, text):
+            if getattr(self, "_pdf2zh_gui_use_messages", False):
+                return native_messages_translate(self, text)
+            return orig_do_translate(self, text)
+
+        cls.__init__ = patched_init
+        cls.do_translate = patched_do_translate
+        cls._pdf2zh_gui_messages_patch = True
+
+    interp = getattr(pdfinterp, "PDFPageInterpreterEx", None)
+    if interp is not None and not getattr(interp, "_pdf2zh_gui_scs_patch", False):
+        orig_interp_init = interp.__init__
+
+        def patched_interp_init(self, *args, **kwargs):
+            orig_interp_init(self, *args, **kwargs)
+            if not hasattr(self, "scs"):
+                self.scs = None
+
+        interp.__init__ = patched_interp_init
+        interp._pdf2zh_gui_scs_patch = True
+
+
+def _http(timeout: int):
+    """httpx Client with proxy fallback (new httpx uses proxy=, old uses proxies=)."""
+    import httpx
+
+    try:
+        return httpx.Client(timeout=timeout, follow_redirects=True,
+                            proxy=_PROXY)
+    except TypeError:
+        return httpx.Client(timeout=timeout, follow_redirects=True,
+                            proxies=_PROXY)
+    except Exception:
+        return httpx.Client(timeout=timeout, follow_redirects=True)
+
+
+def fetch_models(stype: str, envs: dict) -> list[str]:
+    if stype == "azure-openai":
+        raise ValueError("Azure 使用部署名，请到 Azure 门户查看")
+    import httpx
+    from httpx import TimeoutException
+    base, headers = _api_target(stype, envs)
+    try:
+        with _http(10) as c:
+            if stype == "ollama":
+                r = c.get(f"{base}/api/tags")
+                r.raise_for_status()
+                return sorted(m["name"] for m in r.json().get("models", []))
+            # Anthropic-native endpoints use GET <base>/models (no results key)
+            r = c.get(f"{base}/models", headers=headers)
+            if r.status_code >= 400:
+                raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
+            data = r.json()
+            ids = [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+            ids = [i[7:] if i.startswith("models/") else i for i in ids]
+            if not ids:
+                raise ValueError("接口未返回任何模型")
+            return sorted(set(ids))
+    except TimeoutException:
+        raise TimeoutError(
+            f"超过 10 秒未响应，请检查：\n"
+            f"① 网络代理（本机建议开 10808）\n"
+            f"② API Key 是否正确\n"
+            f"③ Base URL 是否可访问"
+        )
+
+
+def test_service(  # type: ignore[no-redef]
+    stype: str, envs: dict, model: str, timeout: int = 10
+) -> str:
+    """Minimal 1-token chat round-trip with user-friendly timeout message."""
+    import httpx
+    from httpx import TimeoutException as _TimeoutException
+
+    base, headers = _api_target(stype, envs)
+
+    try:
+        with _http(timeout) as c:
+            if stype == "ollama":
+                r = c.get(f"{base}/api/tags")
+                r.raise_for_status()
+                names = [m["name"] for m in r.json().get("models", [])]
+                if model and model not in names and f"{model}:latest" not in names:
+                    raise ValueError(
+                        f"服务已连通，但本地没有模型 {model}"
+                        f"（已装：{', '.join(names[:6]) or '无'}）"
+                    )
+                return "Ollama 连接正常" + (f"，模型 {model} 可用" if model else "")
+            if not model:
+                raise ValueError("请先填写模型名称")
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+            }
+            if stype == "azure-openai":
+                ver = (envs.get("AZURE_OPENAI_API_VERSION") or "2024-06-01").strip()
+                url = f"{base}/openai/deployments/{model}/chat/completions?api-version={ver}"
+                r = c.post(url, headers=headers, json=payload)
+            elif stype in ("anthropic", "claudeliked") or "/anthropic" in base or "anthropic.com" in base:
+                # LongCat / custom Claude-like gateways may speak Anthropic-native
+                # POST <base>/messages rather than /chat/completions
+                if "/anthropic" in base or "anthropic.com" in base:
+                    r = c.post(f"{base}/messages", headers=headers, json=payload)
+                else:
+                    try:
+                        r = c.post(f"{base}/chat/completions", headers=headers, json=payload)
+                        if r.status_code in (404, 405):
+                            raise Exception  # fall through to /messages
+                    except Exception:
+                        r = c.post(f"{base}/messages", headers=headers, json=payload)
+            else:
+                r = c.post(f"{base}/chat/completions", headers=headers, json=payload)
+            if r.status_code >= 400:
+                raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
+            return f"连接成功，{model} 响应正常"
+    except _TimeoutException:
+        raise TimeoutError(
+            f"超过 {timeout} 秒未响应，请检查：\n"
+            f"① 网络代理（本机建议开 10808）\n"
+            f"② API Key 是否正确\n"
+            f"③ Base URL 是否可访问"
+        )
+
+GUI_SERVICES_PATH = CONFIG_PATH.with_name("gui_services.json")
+
+# ---- Anthropic palette ----
+IVORY = "#F0EEE6"      # window background
+PAPER = "#FAF9F5"      # cards
+WHITE = "#FFFFFF"      # inputs / lists
+INK = "#1F1E1D"        # primary text
+SLATE = "#57564F"      # secondary text
+FAINT = "#9B998F"      # hints / disabled
+LINE = "#DCD8CC"       # hairline borders
+CLAY = "#D97757"       # Claude orange
+CLAY_DK = "#BA5D3F"    # orange hover
+TINT = "#F3E8E0"       # clay-tinted hover
+GHOST_H = "#ECE8DC"    # neutral ghost hover
+BAR_BG = "#E5E1D3"     # progress trough
+
+COLOR_WAIT = FAINT
+COLOR_RUN = CLAY
+COLOR_OK = "#6E8F5E"
+COLOR_FAIL = "#A8432F"
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def load_profiles() -> list[dict]:
+    """User-defined AI services, with URL normalization for stored records."""
+    try:
+        data = json.loads(GUI_SERVICES_PATH.read_text(encoding="utf-8"))
+        result = []
+        for p in data:
+            if not (p.get("display") and p.get("type") in SERVICE_SCHEMAS):
+                continue
+            stype = p["type"]
+            envs = p.get("envs", {})
+            # auto-fix any base-url fields that were saved before smart-normalize
+            for k, v in list(envs.items()):
+                if v and (k.endswith("BASE_URL") or k.endswith("HOST")):
+                    envs[k] = _normalize_base_url(v, stype)
+            result.append(p)
+        return result
+    except Exception:
+        return []
+
+
+def save_profiles(profiles: list[dict]):
+    GUI_SERVICES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    GUI_SERVICES_PATH.write_text(
+        json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def parse_pages(text: str):
+    """'1,3,5-8' (1-based) -> [0,2,4,5,6,7]; empty/全部 -> None."""
+    text = text.strip()
+    if not text or text in ("全部", "all", "ALL"):
+        return None
+    pages = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            if a < 1 or b < a:
+                raise ValueError(part)
+            pages.extend(range(a - 1, b))
+        elif part.isdigit() and int(part) >= 1:
+            pages.append(int(part) - 1)
+        else:
+            raise ValueError(part)
+    return sorted(set(pages))
+
+
+class QueueLogHandler(logging.Handler):
+    def __init__(self, q: queue.Queue):
+        super().__init__(level=logging.INFO)
+        self.q = q
+
+    def emit(self, record):
+        try:
+            self.q.put(("log", record.getMessage()))
+        except Exception:
+            pass
+
+
+class FastScrollFrame(ctk.CTkScrollableFrame):
+    """CTkScrollableFrame with 3x wheel speed on Windows (delta/6 -> delta/2)."""
+
+    def _mouse_wheel_all(self, event):
+        if sys.platform.startswith("win") and self.check_if_master_is_canvas(event.widget):
+            if self._shift_pressed:
+                if self._parent_canvas.xview() != (0.0, 1.0):
+                    self._parent_canvas.xview("scroll", -int(event.delta / 2), "units")
+            else:
+                if self._parent_canvas.yview() != (0.0, 1.0):
+                    self._parent_canvas.yview("scroll", -int(event.delta / 2), "units")
+        else:
+            super()._mouse_wheel_all(event)
+
+
+class ServiceDialog(ctk.CTkToplevel):
+    """Add / edit an AI translation service profile."""
+
+    def __init__(self, master, on_save, profile=None):
+        super().__init__(master, fg_color=IVORY)
+        self.on_save = on_save
+        self.profile = profile or {}
+        self.title("编辑服务" if profile else "添加服务")
+        self.geometry("520x600")
+        self.minsize(520, 480)
+        self.transient(master)
+        self.grab_set()
+
+        f = master.f_body
+        self._rows: list[tuple] = []
+
+        ctk.CTkLabel(self, text="服务类型", font=master.f_section, text_color=INK).pack(
+            anchor="w", padx=20, pady=(18, 4)
+        )
+        cur_type = self.profile.get("type", "openailiked")
+        self.type_var = ctk.StringVar(value=SERVICE_TYPE_LABELS[cur_type])
+        self.type_menu = ctk.CTkOptionMenu(
+            self, variable=self.type_var, values=list(TYPE_LABEL_TO_KEY),
+            width=240, height=30, font=f, fg_color=WHITE, text_color=INK,
+            button_color="#E7E2D5", button_hover_color="#D9D3C3",
+            dropdown_fg_color=WHITE, dropdown_text_color=INK,
+            dropdown_hover_color=IVORY, dropdown_font=f, corner_radius=8,
+            command=lambda _: self._render_fields(),
+        )
+        self.type_menu.pack(anchor="w", padx=20)
+        if profile:
+            self.type_menu.configure(state="disabled")
+
+        ctk.CTkLabel(self, text="显示名称", font=master.f_section, text_color=INK).pack(
+            anchor="w", padx=20, pady=(14, 4)
+        )
+        self.name_entry = ctk.CTkEntry(
+            self, width=240, height=30, fg_color=WHITE, border_color=LINE,
+            border_width=1, text_color=INK, corner_radius=8, font=f,
+            placeholder_text="例如：我的 Claude",
+        )
+        self.name_entry.pack(anchor="w", padx=20)
+        if self.profile.get("display"):
+            self.name_entry.insert(0, self.profile["display"])
+
+        self.fields_frame = ctk.CTkFrame(self, fg_color=PAPER, corner_radius=12,
+                                         border_width=1, border_color=LINE)
+        self.fields_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+        self.master_ref = master
+
+        self._bar = ctk.CTkFrame(self, fg_color="transparent")
+        self._bar.pack(fill="x", padx=20, pady=(0, 4))
+        self._build_bar()
+
+        # multi-line message box (3 lines visible)
+        self.err_box = ctk.CTkTextbox(
+            self, height=50, wrap="word", state="disabled",
+            fg_color=IVORY, text_color=COLOR_FAIL, font=master.f_small,
+            border_width=0, activate_scrollbars=False,
+        )
+        self.err_box.pack(fill="x", padx=20, pady=(0, 8))
+
+        self._render_fields()
+
+    def _build_bar(self):
+        bar = self._bar
+        for w in bar.winfo_children():
+            w.destroy()
+        ctk.CTkButton(
+            bar, text="保存", width=90, height=34, font=self.master_ref.f_btn,
+            fg_color=CLAY, hover_color=CLAY_DK, text_color=WHITE, corner_radius=8,
+            command=self._save,
+        ).pack(side="left")
+        ctk.CTkButton(
+            bar, text="取消", width=70, height=34,
+            font=self.master_ref.f_body,
+            fg_color="transparent", border_width=1, border_color=LINE,
+            text_color=SLATE, hover_color=GHOST_H, corner_radius=8,
+            command=self.destroy,
+        ).pack(side="left", padx=6)
+        ctk.CTkButton(
+            bar, text="🔌 测试连通性", width=120, height=34,
+            font=self.master_ref.f_small,
+            fg_color="transparent", border_width=1, border_color="#6E8F5E",
+            text_color="#6E8F5E", hover_color="#E4EDE0", corner_radius=8,
+            command=self._test_connection,
+        ).pack(side="right", padx=(0, 0))
+        ctk.CTkButton(
+            bar, text="📋 获取可用模型", width=120, height=34,
+            font=self.master_ref.f_small,
+            fg_color="transparent", border_width=1, border_color="#6E8F5E",
+            text_color="#6E8F5E", hover_color="#E4EDE0", corner_radius=8,
+            command=self._fetch_models,
+        ).pack(side="right", padx=(0, 8))
+
+    def _current_type_and_envs(self):
+        key = TYPE_LABEL_TO_KEY[self.type_var.get()]
+        envs = {}
+        for env_key, entry, _required in self._rows:
+            val = entry.get().strip()
+            if val:
+                # live-normalize base-URL entries so test/fetch use the right path
+                if env_key.endswith("BASE_URL") or env_key.endswith("HOST"):
+                    norm = _normalize_base_url(val, key)
+                    if norm != val:
+                        entry.delete(0, "end")
+                        entry.insert(0, norm)
+                    val = norm
+                envs[env_key] = val
+        return key, envs
+
+    def _gather_model(self):
+        _, envs = self._current_type_and_envs()
+        schema = SERVICE_SCHEMAS[TYPE_LABEL_TO_KEY[self.type_var.get()]]
+        model_keys = [k for k, *_ in schema if k.endswith("_MODEL")]
+        model = next((envs.get(k, "") for k in model_keys if envs.get(k)), "")
+        return model, envs
+
+    def _set_err(self, text, color=COLOR_FAIL):
+        self.err_box.configure(state="normal")
+        self.err_box.delete("0.0", "end")
+        self.err_box.insert("0.0", text)
+        self.err_box.configure(text_color=color, state="disabled")
+
+    def _test_connection(self):
+        stype, envs = self._current_type_and_envs()
+        model, _ = self._gather_model()
+        self._set_err("⏳ 测试中...", SLATE)
+        self._toggle_buttons(False)
+        import threading as _th
+        _th.Thread(target=self._do_test, args=(stype, envs, model), daemon=True).start()
+
+    def _do_test(self, stype, envs, model):
+        try:
+            msg = test_service(stype, envs, model)
+            self._after_safe(lambda: self._set_err(f"✅ {msg}", COLOR_OK))
+        except Exception as e:
+            self._after_safe(lambda: self._set_err(f"❌ {e}", COLOR_FAIL))
+        finally:
+            self._after_safe(lambda: self._toggle_buttons(True))
+
+    def _fetch_models(self):
+        stype, envs = self._current_type_and_envs()
+        self._set_err("⏳ 获取模型列表...", SLATE)
+        self._toggle_buttons(False)
+        import threading as _th
+        _th.Thread(target=self._do_fetch, args=(stype, envs), daemon=True).start()
+
+    def _do_fetch(self, stype, envs):
+        try:
+            models = fetch_models(stype, envs)
+            self._after_safe(lambda: self._set_err(
+                f"✅ 找到 {len(models)} 个模型，已填入 {models[0]}", COLOR_OK
+            ))
+            self._after_safe(lambda: self._fill_model(models))
+        except Exception as e:
+            self._after_safe(lambda: self._set_err(f"❌ {e}", COLOR_FAIL))
+        finally:
+            self._after_safe(lambda: self._toggle_buttons(True))
+
+    def _fill_model(self, models: list[str]):
+        """Put first model into the model-name entry if it's empty or default."""
+        schema = SERVICE_SCHEMAS[TYPE_LABEL_TO_KEY[self.type_var.get()]]
+        model_keys = {k for k, *_ in schema if k.endswith("_MODEL")}
+        if not models:
+            return
+        for env_key, entry, _required in self._rows:
+            if env_key in model_keys:
+                cur = entry.get().strip()
+                if not cur or cur == dict(schema).get(env_key, ""):
+                    entry.delete(0, "end")
+                    entry.insert(0, models[0])
+
+    def _toggle_buttons(self, enabled):
+        state = "normal" if enabled else "disabled"
+        for w in self._bar.winfo_children():
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+
+    def _after_safe(self, fn):
+        try:
+            self.after(0, fn)
+        except Exception:
+            pass
+
+    def _render_fields(self):
+        for w in self.fields_frame.winfo_children():
+            w.destroy()
+        self._rows.clear()
+        key = TYPE_LABEL_TO_KEY[self.type_var.get()]
+        saved = self.profile.get("envs", {})
+        for env_key, label, required, secret, default in SERVICE_SCHEMAS[key]:
+            row = ctk.CTkFrame(self.fields_frame, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=5)
+            text = label + ("  *" if required else "")
+            ctk.CTkLabel(row, text=text, width=110, anchor="w",
+                         font=self.master_ref.f_body, text_color=SLATE).pack(side="left")
+            entry = ctk.CTkEntry(
+                row, height=30, fg_color=WHITE, border_color=LINE, border_width=1,
+                text_color=INK, corner_radius=8, font=self.master_ref.f_body,
+                show="•" if secret else "",
+            )
+            entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+            entry.insert(0, saved.get(env_key, default))
+            if secret:
+                btn = ctk.CTkButton(
+                    row, text="显示", width=44, height=28, font=self.master_ref.f_small,
+                    fg_color="transparent", border_width=1, border_color=LINE,
+                    text_color=FAINT, hover_color=GHOST_H, corner_radius=6,
+                )
+                btn.configure(command=lambda e=entry, b=btn: self._toggle(e, b))
+                btn.pack(side="left", padx=(6, 0))
+            self._rows.append((env_key, entry, required))
+
+    @staticmethod
+    def _toggle(entry, btn):
+        hidden = entry.cget("show")
+        entry.configure(show="" if hidden else "•")
+        btn.configure(text="隐藏" if hidden else "显示")
+
+    def _save(self):
+        display = self.name_entry.get().strip()
+        if not display:
+            self._set_err("请填写显示名称")
+            return
+        stype = TYPE_LABEL_TO_KEY[self.type_var.get()]
+        envs = {}
+        for env_key, entry, required in self._rows:
+            val = entry.get().strip()
+            if required and not val:
+                self._set_err(f"必填项缺失：{env_key}")
+                return
+            if val:
+                # smart-complete base-URL fields
+                if env_key.endswith("BASE_URL") or env_key.endswith("HOST"):
+                    if not val.startswith(("http://", "https://")):
+                        self._set_err(f"{env_key} 应以 http:// 或 https:// 开头")
+                        return
+                    norm = _normalize_base_url(val, stype)
+                    if norm != val:
+                        entry.delete(0, "end")
+                        entry.insert(0, norm)
+                    val = norm
+                envs[env_key] = val
+        self.on_save({
+            "display": display,
+            "type": stype,
+            "envs": envs,
+        }, self.profile.get("display"))
+        self.destroy()
+
+
+class App(ctk.CTk, TkinterDnD.DnDWrapper):
+    _model = None  # layout model, loaded once
+
+    def __init__(self):
+        super().__init__(fg_color=IVORY)
+        self.TkdndVersion = TkinterDnD._require(self)
+
+        self.title("PDF 翻译 · pdf2zh")
+        if APP_ICON_PATH.exists():
+            try:
+                self.iconbitmap(str(APP_ICON_PATH))
+            except Exception:
+                pass
+        try:
+            scale = self._get_window_scaling()
+        except Exception:
+            scale = 1.0
+        sh = int(self.winfo_screenheight() / scale)
+        sw = int(self.winfo_screenwidth() / scale)
+        h = max(560, min(780, sh - 120))
+        x = max(0, (sw - 840) // 2)
+        self.geometry(f"840x{h}+{x}+24")
+        self.minsize(620, 400)
+
+        self._q = queue.Queue()
+        self._files: dict[str, dict] = {}  # path -> {row,status}
+        self._cancel = threading.Event()
+        self._running = False
+        self._out_dirs: set[str] = set()
+
+        fams = set(tkfont.families(self))
+
+        def pick(*prefs, fallback="Microsoft YaHei UI"):
+            return next((f for f in prefs if f in fams), fallback)
+
+        # CJK-aware UI fonts: prefer modern faces if installed, else YaHei
+        ui = pick("MiSans", "HarmonyOS Sans SC", "OPPO Sans", "Sarasa UI SC",
+                  "LXGW WenKai", "霞鹜文楷", "Noto Sans SC")
+        serif = pick("LXGW WenKai", "霞鹜文楷", "Source Han Serif SC",
+                     "思源宋体", "Noto Serif SC", "华文中宋", fallback="华文楷体")
+        mono = pick("Sarasa Mono SC", "Cascadia Code", "JetBrains Mono",
+                    "Fira Code", fallback="Consolas")
+
+        self.f_body = ctk.CTkFont(family=ui, size=13)
+        self.f_small = ctk.CTkFont(family=ui, size=11)
+        self.f_section = ctk.CTkFont(family=ui, size=12, weight="bold")
+        self.f_btn = ctk.CTkFont(family=ui, size=14, weight="bold")
+        self.f_title = ctk.CTkFont(family=serif, size=26, weight="bold")
+        self.f_sub = ctk.CTkFont(family=serif, size=12)
+        self.f_mono = ctk.CTkFont(family=mono, size=11)
+
+        cfg = load_config()
+        self._cfg_services = [
+            t.get("name") for t in cfg.get("translators", []) if t.get("name")
+        ]
+        self._profiles = load_profiles()
+
+        logging.basicConfig(level=logging.INFO)
+        logging.getLogger("pdf2zh").addHandler(QueueLogHandler(self._q))
+
+        self._build_ui(self._service_options())
+        self._select_default_service()
+        self.drop_target_register(DND_FILES)
+        self.dnd_bind("<<Drop>>", self._on_drop)
+        self.after(150, self._style_titlebar)
+        self.after(100, self._poll)
+
+    def _style_titlebar(self):
+        """Match Win11 title bar to the ivory theme (no-op elsewhere)."""
+        try:
+            import ctypes
+
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            for attr, val in ((35, 0x00E6EEF0), (36, 0x001D1E1F)):  # caption, text (BGR)
+                v = ctypes.c_int(val)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(v), 4
+                )
+        except Exception:
+            pass
+
+    # ---------- service profiles ----------
+    def _service_options(self) -> list[str]:
+        """Dropdown values: custom profiles, config translators, keyless."""
+        names = [f"★ {p['display']}" for p in self._profiles]
+        names += [s for s in self._cfg_services if s not in KEYLESS_SERVICES]
+        names += list(KEYLESS_SERVICES)
+        return list(dict.fromkeys(names)) or ["google"]
+
+    def _select_default_service(self):
+        opts = self._service_options()
+        self.service_var.set(opts[0])
+
+    def _profile_by_display(self, display: str):
+        return next((p for p in self._profiles if p["display"] == display), None)
+
+    def _selected_service(self):
+        """-> (service_str_for_pdf2zh, envs_dict_or_None)."""
+        sel = self.service_var.get()
+        if sel.startswith("★ "):
+            p = self._profile_by_display(sel[2:])
+            if p:
+                schema = SERVICE_SCHEMAS[p["type"]]
+                model_keys = [k for k, *_ in schema if k.endswith("_MODEL")]
+                model = next(
+                    (p["envs"][k] for k in model_keys if p["envs"].get(k)), ""
+                )
+                backend = SERVICE_BACKEND.get(p["type"], p["type"])
+                service = f"{backend}:{model}" if model else backend
+                return service, dict(p["envs"])
+        return sel, None
+
+    def _refresh_service_menu(self):
+        self.service_menu.configure(values=self._service_options())
+
+    def _manage_services(self):
+        ServiceDialog(self, self._save_profile)
+
+    def _edit_profile(self):
+        sel = self.service_var.get()
+        profile = self._profile_by_display(sel[2:]) if sel.startswith("★ ") else None
+        if not profile:
+            self._log("仅可编辑自定义服务（带 ★ 前缀），请先从下拉框选中")
+            return
+        ServiceDialog(self, self._save_profile, profile=profile)
+
+    def _save_profile(self, profile: dict, old_display):
+        self._profiles = [
+            p for p in self._profiles
+            if p["display"] not in (profile["display"], old_display)
+        ]
+        self._profiles.insert(0, profile)
+        save_profiles(self._profiles)
+        self._refresh_service_menu()
+        self.service_var.set(f"★ {profile['display']}")
+        self._log(f"已保存服务：{profile['display']}（{SERVICE_TYPE_LABELS[profile['type']]}）")
+
+    def _delete_profile(self):
+        sel = self.service_var.get()
+        if not sel.startswith("★ "):
+            self._log("仅可删除自定义服务（带 ★ 前缀）")
+            return
+        name = sel[2:]
+        self._profiles = [p for p in self._profiles if p["display"] != name]
+        save_profiles(self._profiles)
+        self._refresh_service_menu()
+        self._select_default_service()
+        self._log(f"已删除服务：{name}")
+
+    # ---------- styled widget helpers ----------
+    def _card(self, parent=None, **kw):
+        return ctk.CTkFrame(
+            parent or self.page, fg_color=PAPER, corner_radius=14,
+            border_width=1, border_color=LINE, **kw,
+        )
+
+    def _ghost_btn(self, parent, text, command, accent=False, **kw):
+        return ctk.CTkButton(
+            parent, text=text, command=command, font=self.f_body,
+            fg_color="transparent", border_width=1,
+            border_color=CLAY if accent else LINE,
+            text_color=CLAY if accent else SLATE,
+            hover_color=TINT if accent else GHOST_H,
+            corner_radius=8, height=32, **kw,
+        )
+
+    def _menu(self, parent, var, values, width):
+        return ctk.CTkOptionMenu(
+            parent, variable=var, values=values, width=width, height=30,
+            fg_color=WHITE, text_color=INK, font=self.f_body,
+            button_color="#E7E2D5", button_hover_color="#D9D3C3",
+            dropdown_fg_color=WHITE, dropdown_text_color=INK,
+            dropdown_hover_color=IVORY, dropdown_font=self.f_body,
+            corner_radius=8,
+        )
+
+    def _label(self, parent, text):
+        return ctk.CTkLabel(parent, text=text, font=self.f_body, text_color=SLATE)
+
+    # ---------- UI ----------
+    def _build_ui(self, services):
+        PADX = 16
+
+        # whole page scrolls; small heights just show the scrollbar
+        self.page = FastScrollFrame(
+            self, fg_color=IVORY, corner_radius=0,
+            scrollbar_button_color="#CDC8B9", scrollbar_button_hover_color="#B8B2A0",
+        )
+        self.page.pack(fill="both", expand=True)
+
+        header = ctk.CTkFrame(self.page, fg_color="transparent")
+        header.pack(fill="x", padx=PADX, pady=(14, 6))
+        tbox = ctk.CTkFrame(header, fg_color="transparent")
+        tbox.pack(side="left", padx=(4, 0))
+        ctk.CTkLabel(tbox, text="PDF 翻译", font=self.f_title, text_color=INK).pack(
+            anchor="w"
+        )
+        ctk.CTkLabel(
+            tbox, text="英文文献 → 中文 · 本地运行 · pdf2zh 驱动",
+            font=self.f_sub, text_color=FAINT,
+        ).pack(anchor="w")
+
+        # file card (packed last so it absorbs shrink; bottom cards keep space)
+        card = self._card()
+        bar = ctk.CTkFrame(card, fg_color="transparent")
+        bar.pack(fill="x", padx=12, pady=(10, 6))
+        self._ghost_btn(bar, "＋ 添加 PDF", self._pick_files, accent=True, width=112).pack(
+            side="left", padx=(0, 8)
+        )
+        self._ghost_btn(bar, "清空列表", self._clear_files, width=88).pack(side="left")
+        ctk.CTkLabel(
+            bar, text="或将 PDF 拖入窗口任意位置", font=self.f_small, text_color=FAINT
+        ).pack(side="right", padx=4)
+
+        self.file_frame = ctk.CTkScrollableFrame(
+            card, fg_color=WHITE, corner_radius=10, height=150,
+            border_width=1, border_color=LINE,
+            scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
+        )
+        self.file_frame.pack(fill="x", padx=12, pady=(0, 12))
+        self._empty_hint = ctk.CTkLabel(
+            self.file_frame, text="将 PDF 拖到这里\n或点击上方「添加 PDF」",
+            font=self.f_body, text_color=FAINT, justify="center",
+        )
+        self._empty_hint.pack(pady=36)
+
+        # settings card
+        opt = self._card()
+        opt.grid_columnconfigure((1, 3, 5), weight=1)
+        ctk.CTkLabel(opt, text="翻译设置", font=self.f_section, text_color=INK).grid(
+            row=0, column=0, columnspan=6, padx=14, pady=(10, 0), sticky="w"
+        )
+
+        self._label(opt, "翻译服务").grid(row=1, column=0, padx=(14, 4), pady=8, sticky="e")
+        svc_box = ctk.CTkFrame(opt, fg_color="transparent")
+        svc_box.grid(row=1, column=1, columnspan=5, padx=4, pady=8, sticky="w")
+        self.service_var = ctk.StringVar(value="google")
+        self.service_menu = self._menu(svc_box, self.service_var, services, 240)
+        self.service_menu.pack(side="left")
+        ctk.CTkButton(
+            svc_box, text="＋ 添加模型", width=92, height=30, font=self.f_body,
+            fg_color="transparent", border_width=1, border_color=CLAY,
+            text_color=CLAY, hover_color=TINT, corner_radius=8,
+            command=self._manage_services,
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            svc_box, text="编辑", width=56, height=30, font=self.f_body,
+            fg_color="transparent", border_width=1, border_color=LINE,
+            text_color=SLATE, hover_color=GHOST_H, corner_radius=8,
+            command=self._edit_profile,
+        ).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(
+            svc_box, text="删除", width=56, height=30, font=self.f_body,
+            fg_color="transparent", border_width=1, border_color=LINE,
+            text_color=FAINT, hover_color=GHOST_H, corner_radius=8,
+            command=self._delete_profile,
+        ).pack(side="left", padx=(6, 0))
+
+        self._label(opt, "源语言").grid(row=2, column=0, padx=(14, 4), pady=8, sticky="e")
+        self.lang_in_var = ctk.StringVar(value="English")
+        self._menu(opt, self.lang_in_var, list(LANGS), 116).grid(
+            row=2, column=1, padx=4, pady=8, sticky="w"
+        )
+        self._label(opt, "目标语言").grid(row=2, column=2, padx=(12, 4), pady=8, sticky="e")
+        self.lang_out_var = ctk.StringVar(value="简体中文")
+        self._menu(opt, self.lang_out_var, list(LANGS), 116).grid(
+            row=2, column=3, padx=4, pady=8, sticky="w"
+        )
+        self._label(opt, "并发线程").grid(row=2, column=4, padx=(12, 4), pady=8, sticky="e")
+        self.thread_var = ctk.StringVar(value="4")
+        self._menu(opt, self.thread_var, ["1", "2", "4", "8"], 100).grid(
+            row=2, column=5, padx=(4, 14), pady=8, sticky="w"
+        )
+
+        self._label(opt, "页码范围").grid(row=3, column=0, padx=(14, 4), pady=(2, 10), sticky="e")
+        self.pages_entry = ctk.CTkEntry(
+            opt, placeholder_text="全部，或如 1-5,8", width=130, height=30,
+            fg_color=WHITE, border_color=LINE, border_width=1,
+            text_color=INK, placeholder_text_color=FAINT,
+            corner_radius=8, font=self.f_body,
+        )
+        self.pages_entry.grid(row=3, column=1, padx=4, pady=(2, 10), sticky="w")
+        self.cache_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            opt, text="忽略翻译缓存", variable=self.cache_var,
+            font=self.f_body, text_color=SLATE,
+            fg_color=CLAY, hover_color=CLAY_DK, checkmark_color=WHITE,
+            border_color="#B9B3A5", border_width=2, corner_radius=6,
+        ).grid(row=3, column=2, columnspan=2, padx=12, pady=(2, 10), sticky="w")
+
+        # output card
+        out = self._card()
+        ctk.CTkLabel(out, text="输出位置", font=self.f_section, text_color=INK).pack(
+            side="left", padx=(14, 10), pady=12
+        )
+        self.out_mode = ctk.StringVar(value="same")
+        rb_kw = dict(
+            variable=self.out_mode, font=self.f_body, text_color=SLATE,
+            fg_color=CLAY, hover_color=CLAY_DK, border_color="#B9B3A5",
+        )
+        ctk.CTkRadioButton(out, text="原 PDF 所在目录", value="same", **rb_kw).pack(
+            side="left", padx=6
+        )
+        ctk.CTkRadioButton(out, text="指定：", value="custom", **rb_kw).pack(
+            side="left", padx=(12, 2)
+        )
+        self.out_entry = ctk.CTkEntry(
+            out, width=220, height=30, fg_color=WHITE, border_color=LINE,
+            border_width=1, text_color=INK, corner_radius=8, font=self.f_body,
+        )
+        self.out_entry.pack(side="left", padx=2, fill="x", expand=True)
+        self._ghost_btn(out, "浏览…", self._browse_out, width=72).pack(
+            side="left", padx=(8, 14)
+        )
+
+        # run card
+        run = self._card()
+        self.progress = ctk.CTkProgressBar(
+            run, height=8, corner_radius=4, fg_color=BAR_BG, progress_color=CLAY
+        )
+        self.progress.set(0)
+        self.progress.pack(fill="x", padx=14, pady=(14, 6))
+        self.status_label = ctk.CTkLabel(
+            run, text="就绪", font=self.f_small, text_color=SLATE
+        )
+        self.status_label.pack(anchor="w", padx=14, pady=(0, 4))
+
+        btns = ctk.CTkFrame(run, fg_color="transparent")
+        btns.pack(fill="x", padx=10, pady=(0, 12))
+        self.start_btn = ctk.CTkButton(
+            btns, text="开始翻译", width=150, height=38, command=self._start,
+            font=self.f_btn, corner_radius=8,
+            fg_color=CLAY, hover_color=CLAY_DK, text_color=WHITE,
+            text_color_disabled="#EFD9CE",
+        )
+        self.start_btn.pack(side="left", padx=6)
+        self.cancel_btn = self._ghost_btn(btns, "取消", self._cancel_run, width=90)
+        self.cancel_btn.configure(state="disabled", height=38)
+        self.cancel_btn.pack(side="left", padx=6)
+        self.open_btn = self._ghost_btn(btns, "打开输出位置", self._open_out, width=120)
+        self.open_btn.configure(state="disabled", height=38)
+        self.open_btn.pack(side="left", padx=6)
+
+        self.log_box = ctk.CTkTextbox(
+            self.page, height=88, state="disabled", wrap="word",
+            fg_color=WHITE, text_color=SLATE, font=self.f_mono,
+            corner_radius=10, border_width=1, border_color=LINE,
+            scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
+        )
+        self._log_is_empty = True
+        self._set_log_hint()
+        # natural top-down flow inside the scrollable page
+        card.pack(fill="x", padx=PADX, pady=6)
+        opt.pack(fill="x", padx=PADX, pady=6)
+        out.pack(fill="x", padx=PADX, pady=6)
+        run.pack(fill="x", padx=PADX, pady=6)
+        self.log_box.pack(fill="x", padx=PADX, pady=(2, 14))
+
+    # ---------- file list ----------
+    def _on_drop(self, event):
+        paths = self.tk.splitlist(event.data)
+        pdfs = [p for p in paths if p.lower().endswith(".pdf")]
+        skipped = len(paths) - len(pdfs)
+        if skipped:
+            self._log(f"已忽略 {skipped} 个非 PDF 文件")
+        self._add_files(pdfs)
+
+    def _pick_files(self):
+        paths = filedialog.askopenfilenames(
+            title="选择 PDF 文件", filetypes=[("PDF 文件", "*.pdf")]
+        )
+        self._add_files(paths)
+
+    def _add_files(self, paths):
+        if self._running:
+            return
+        for p in paths:
+            p = str(Path(p))
+            if p in self._files or not Path(p).is_file():
+                continue
+            self._empty_hint.pack_forget()
+            row = ctk.CTkFrame(self.file_frame, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkButton(
+                row, text="✕", width=26, height=24, font=self.f_body,
+                fg_color="transparent", hover_color=TINT, text_color=FAINT,
+                command=lambda _p=p: self._remove_file(_p),
+            ).pack(side="left", padx=(2, 6))
+            ctk.CTkLabel(
+                row, text=Path(p).name, anchor="w", font=self.f_body, text_color=INK
+            ).pack(side="left", fill="x", expand=True)
+            status = ctk.CTkLabel(
+                row, text="等待", width=110, anchor="e",
+                font=self.f_small, text_color=COLOR_WAIT,
+            )
+            status.pack(side="right", padx=8)
+            self._files[p] = {"row": row, "status": status}
+        if self._files:
+            self._log(f"列表共 {len(self._files)} 个文件")
+
+    def _remove_file(self, path):
+        if self._running:
+            return
+        info = self._files.pop(path, None)
+        if info:
+            info["row"].destroy()
+        if not self._files:
+            self._empty_hint.pack(pady=36)
+
+    def _clear_files(self):
+        if self._running:
+            return
+        for info in self._files.values():
+            info["row"].destroy()
+        self._files.clear()
+        self._empty_hint.pack(pady=36)
+
+    def _set_status(self, path, text, color):
+        info = self._files.get(path)
+        if info:
+            info["status"].configure(text=text, text_color=color)
+
+    # ---------- run ----------
+    def _browse_out(self):
+        d = filedialog.askdirectory(title="选择输出目录")
+        if d:
+            self.out_mode.set("custom")
+            self.out_entry.delete(0, "end")
+            self.out_entry.insert(0, d)
+
+    def _start(self):
+        if self._running or not self._files:
+            if not self._files:
+                self._log("请先添加 PDF 文件")
+            return
+        try:
+            pages = parse_pages(self.pages_entry.get())
+        except ValueError as e:
+            self._log(f"页码格式有误：{e}，示例：1-5,8")
+            return
+        output = ""
+        if self.out_mode.get() == "custom":
+            output = self.out_entry.get().strip()
+            if not output:
+                self._log("请填写输出目录，或选择「原 PDF 所在目录」")
+                return
+        service, envs = self._selected_service()
+
+        params = {
+            "pages": pages,
+            "lang_in": LANGS[self.lang_in_var.get()],
+            "lang_out": LANGS[self.lang_out_var.get()],
+            "service": service,
+            "envs": envs,
+            "thread": int(self.thread_var.get()),
+            "output": output,
+            "ignore_cache": self.cache_var.get(),
+        }
+        files = list(self._files)
+        for p in files:
+            self._set_status(p, "等待", COLOR_WAIT)
+        self._out_dirs.clear()
+        self._cancel.clear()
+        self._set_running(True)
+        self.progress.set(0)
+        threading.Thread(
+            target=self._worker, args=(files, params, self._cancel), daemon=True
+        ).start()
+
+    def _cancel_run(self):
+        if self._running:
+            self._cancel.set()
+            self._log("正在取消（当前页处理完后停止）...")
+
+    def _set_running(self, running):
+        self._running = running
+        state = "disabled" if running else "normal"
+        self.start_btn.configure(state=state)
+        self.cancel_btn.configure(state="normal" if running else "disabled")
+
+    def _open_out(self):
+        for d in self._out_dirs or {str(Path.cwd())}:
+            try:
+                os.startfile(d)
+            except OSError:
+                self._log(f"无法打开目录：{d}")
+
+    # ---------- worker (background thread) ----------
+    def _worker(self, files, params, cancel):
+        q = self._q
+        try:
+            q.put(("status", "正在加载 pdf2zh 核心与布局模型（首次需十几秒）..."))
+            import asyncio
+            patch_pdf2zh_runtime()
+            from pdf2zh.doclayout import OnnxModel
+            from pdf2zh.high_level import translate
+
+            if App._model is None:
+                App._model = OnnxModel.load_available()
+            q.put(("log", "布局模型就绪"))
+
+            n = len(files)
+            for i, f in enumerate(files, 1):
+                if cancel.is_set():
+                    q.put(("file_status", f, "已取消", COLOR_FAIL))
+                    continue
+                out_dir = Path(params["output"]) if params["output"] else Path(f).parent
+                out_dir.mkdir(parents=True, exist_ok=True)
+                q.put(("file_status", f, "翻译中", COLOR_RUN))
+                q.put(("status", f"文件 {i}/{n}：{Path(f).name}"))
+
+                def cb(t, _f=f, _i=i, _n=n):
+                    total = getattr(t, "total", None) or 0
+                    done = getattr(t, "n", 0)
+                    q.put(("page", done, total, _f, _i, _n))
+
+                try:
+                    res = translate(
+                        files=[f],
+                        output=str(out_dir),
+                        pages=params["pages"],
+                        lang_in=params["lang_in"],
+                        lang_out=params["lang_out"],
+                        service=params["service"],
+                        envs=params["envs"],
+                        thread=params["thread"],
+                        callback=cb,
+                        cancellation_event=cancel,
+                        model=App._model,
+                        ignore_cache=params["ignore_cache"],
+                    )
+                    mono, dual = res[0]
+                    q.put(("file_status", f, "完成", COLOR_OK))
+                    q.put(("log", f"完成：{Path(dual).name}（双语）/ {Path(mono).name}（纯译文）"))
+                    q.put(("done_dir", str(out_dir)))
+                except asyncio.CancelledError:
+                    q.put(("file_status", f, "已取消", COLOR_FAIL))
+                    q.put(("log", f"已取消：{Path(f).name}"))
+                except Exception:
+                    q.put(("file_status", f, "失败", COLOR_FAIL))
+                    q.put(("log", f"失败:{Path(f).name}\n{traceback.format_exc(limit=3)}"))
+        except Exception:
+            q.put(("log", "初始化失败：\n" + traceback.format_exc(limit=5)))
+        finally:
+            q.put(("all_done",))
+
+    # ---------- event pump ----------
+    def _poll(self):
+        try:
+            while True:
+                self._handle(self._q.get_nowait())
+        except queue.Empty:
+            pass
+        self.after(100, self._poll)
+
+    def _handle(self, ev):
+        kind = ev[0]
+        if kind == "log":
+            self._log(ev[1])
+        elif kind == "status":
+            self.status_label.configure(text=ev[1])
+        elif kind == "file_status":
+            self._set_status(ev[1], ev[2], ev[3])
+        elif kind == "page":
+            done, total, f, i, n = ev[1:]
+            if total:
+                self.progress.set(done / total)
+                self.status_label.configure(
+                    text=f"文件 {i}/{n}：{Path(f).name} · 第 {done}/{total} 页"
+                )
+                self._set_status(f, f"翻译中 {done}/{total}", COLOR_RUN)
+        elif kind == "done_dir":
+            self._out_dirs.add(ev[1])
+            self.open_btn.configure(state="normal")
+        elif kind == "all_done":
+            self._set_running(False)
+            self.progress.set(1 if self._out_dirs else 0)
+            self.status_label.configure(
+                text="已完成" if not self._cancel.is_set() else "已取消"
+            )
+
+    def _log(self, msg):
+        msg = str(msg).rstrip()
+        if not msg:
+            return
+        self.log_box.configure(state="normal")
+        if getattr(self, "_log_is_empty", False):
+            self.log_box.delete("0.0", "end")
+            self.log_box.configure(text_color=SLATE)
+            self._log_is_empty = False
+        self.log_box.insert("end", msg + "\n")
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
+    def _set_log_hint(self):
+        self.log_box.configure(state="normal", text_color=FAINT)
+        self.log_box.delete("0.0", "end")
+        self.log_box.insert(
+            "0.0",
+            "暂无输出\n开始翻译后，这里会显示运行状态、输出文件和错误信息",
+        )
+        self.log_box.configure(state="disabled")
+
+
+def main():
+    ctk.set_appearance_mode("light")
+    ctk.set_default_color_theme("blue")
+    app = App()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
