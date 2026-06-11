@@ -519,7 +519,7 @@ class FastScrollFrame(ctk.CTkScrollableFrame):
 
 
 class PrettyOptionMenu(ctk.CTkFrame):
-    """Segmented option menu with a cleaner chevron button."""
+    """Select-style dropdown: left-aligned value, inline chevron, whole-row click."""
 
     def __init__(
         self, master, variable, values, width, height=30, font=None,
@@ -528,6 +528,7 @@ class PrettyOptionMenu(ctk.CTkFrame):
         super().__init__(
             master, width=width, height=height, fg_color=WHITE,
             corner_radius=8, border_width=1, border_color=LINE,
+            cursor="hand2",
         )
         self.pack_propagate(False)
         self.grid_propagate(False)
@@ -537,7 +538,6 @@ class PrettyOptionMenu(ctk.CTkFrame):
         self._state = state
         self._trace_blocked = False
         self._trace_name = None
-        self._arrow_width = min(42, max(30, height + 10))
         self._current_value = variable.get() if variable is not None else (
             self._values[0] if self._values else ""
         )
@@ -546,28 +546,43 @@ class PrettyOptionMenu(ctk.CTkFrame):
             master=self, values=self._values, command=self._select,
             fg_color=WHITE, hover_color=IVORY, text_color=INK, font=font,
         )
-        self._text_btn = ctk.CTkButton(
-            self, text=self._current_value, height=height - 2,
-            fg_color=WHITE, hover_color=GHOST_H, text_color=INK,
-            font=font, border_width=0, corner_radius=7,
-            command=self._open,
+        # chevron packs first (side=right) so it stays visible at any width;
+        # CTkLabel (unlike CTkButton) has no 140px default that breaks narrow menus
+        self._arrow = ctk.CTkLabel(
+            self, text="▾", width=16, fg_color=WHITE, text_color=FAINT,
+            font=ctk.CTkFont(size=13),
         )
-        self._text_btn.pack(side="left", fill="both", expand=True, padx=(1, 0), pady=1)
-        self._arrow_btn = ctk.CTkButton(
-            self, text="⌄", width=self._arrow_width, height=height - 2,
-            fg_color="#E7E2D5", hover_color="#D9D3C3", text_color=INK,
-            font=ctk.CTkFont(size=17, weight="bold"),
-            border_width=0, corner_radius=7, command=self._open,
+        self._arrow.pack(side="right", padx=(2, 9), pady=1)
+        self._text = ctk.CTkLabel(
+            self, text=self._current_value, anchor="w", fg_color=WHITE,
+            text_color=INK, font=font,
         )
-        self._arrow_btn.pack(side="left", fill="y", padx=(0, 1), pady=1)
+        self._text.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=1)
+
+        for w in (self, self._text, self._arrow):
+            w.bind("<Button-1>", self._on_click)
+            w.bind("<Enter>", self._on_enter)
+            w.bind("<Leave>", self._on_leave)
         if variable is not None:
             self._trace_name = variable.trace_add("write", self._sync_from_var)
-        self.configure(state=state)
+        self._apply_state_colors()
 
     def destroy(self):
         if self._variable is not None and self._trace_name:
             self._variable.trace_remove("write", self._trace_name)
         super().destroy()
+
+    def _apply_state_colors(self):
+        if self._state == "disabled":
+            self._set_bg(IVORY)
+            self._text.configure(text_color=FAINT)
+            self._arrow.configure(text_color="#C9C4B6")
+            super().configure(cursor="arrow")
+        else:
+            self._set_bg(WHITE)
+            self._text.configure(text_color=INK)
+            self._arrow.configure(text_color=FAINT)
+            super().configure(cursor="hand2")
 
     def configure(self, **kwargs):
         if not hasattr(self, "_dropdown"):
@@ -577,16 +592,15 @@ class PrettyOptionMenu(ctk.CTkFrame):
         if values is not None:
             self._values = list(values)
             self._dropdown.configure(values=self._values)
-        super().configure(**kwargs)
+        if kwargs:
+            super().configure(**kwargs)
         if state is not None:
             self._state = state
-            btn_state = "normal" if state != "disabled" else "disabled"
-            self._text_btn.configure(state=btn_state)
-            self._arrow_btn.configure(state=btn_state)
+            self._apply_state_colors()
 
     def set(self, value):
         self._current_value = value
-        self._text_btn.configure(text=value)
+        self._text.configure(text=value)
         if self._variable is not None and self._variable.get() != value:
             self._trace_blocked = True
             self._variable.set(value)
@@ -599,10 +613,34 @@ class PrettyOptionMenu(ctk.CTkFrame):
         if not self._trace_blocked and self._variable is not None:
             self.set(self._variable.get())
 
-    def _open(self):
+    def _set_bg(self, color):
+        super().configure(fg_color=color)
+        self._text.configure(fg_color=color)
+        self._arrow.configure(fg_color=color)
+
+    def _on_enter(self, _e=None):
+        if self._state != "disabled":
+            self._set_bg(GHOST_H)
+            self._arrow.configure(text_color=SLATE)
+
+    def _on_leave(self, _e=None):
+        try:
+            px, py = self.winfo_pointerxy()
+            inside = self.winfo_containing(px, py)
+        except Exception:
+            inside = None
+        path = str(self)
+        if inside is None or not (
+            str(inside) == path or str(inside).startswith(path + ".")
+        ):
+            self._apply_state_colors()
+
+    def _on_click(self, _e=None):
         if self._state == "disabled":
             return
-        self._dropdown.open(self.winfo_rootx(), self.winfo_rooty() + self.winfo_height())
+        self._dropdown.open(
+            self.winfo_rootx(), self.winfo_rooty() + self.winfo_height()
+        )
 
     def _select(self, value):
         self.set(value)
@@ -632,12 +670,9 @@ class ServiceDialog(ctk.CTkToplevel):
         )
         cur_type = self.profile.get("type", "openailiked")
         self.type_var = ctk.StringVar(value=SERVICE_TYPE_LABELS[cur_type])
-        self.type_menu = ctk.CTkOptionMenu(
+        self.type_menu = PrettyOptionMenu(
             self, variable=self.type_var, values=list(TYPE_LABEL_TO_KEY),
-            width=240, height=30, font=f, fg_color=WHITE, text_color=INK,
-            button_color="#E7E2D5", button_hover_color="#D9D3C3",
-            dropdown_fg_color=WHITE, dropdown_text_color=INK,
-            dropdown_hover_color=IVORY, dropdown_font=f, corner_radius=8,
+            width=240, height=30, font=f,
             command=lambda _: self._render_fields(),
         )
         self.type_menu.pack(anchor="w", padx=20)
@@ -1144,23 +1179,23 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
         self._label(opt, "源语言").grid(row=2, column=0, padx=(14, 4), pady=8, sticky="e")
         self.lang_in_var = ctk.StringVar(value="English")
-        self._menu(opt, self.lang_in_var, list(LANGS), 116).grid(
+        self._menu(opt, self.lang_in_var, list(LANGS), 124).grid(
             row=2, column=1, padx=4, pady=8, sticky="w"
         )
         self._label(opt, "目标语言").grid(row=2, column=2, padx=(12, 4), pady=8, sticky="e")
         self.lang_out_var = ctk.StringVar(value="简体中文")
-        self._menu(opt, self.lang_out_var, list(LANGS), 116).grid(
+        self._menu(opt, self.lang_out_var, list(LANGS), 124).grid(
             row=2, column=3, padx=4, pady=8, sticky="w"
         )
         self._label(opt, "并发线程").grid(row=2, column=4, padx=(12, 4), pady=8, sticky="e")
         self.thread_var = ctk.StringVar(value="4")
-        self._menu(opt, self.thread_var, ["1", "2", "4", "8"], 100).grid(
+        self._menu(opt, self.thread_var, ["1", "2", "4", "8"], 96).grid(
             row=2, column=5, padx=(4, 14), pady=8, sticky="w"
         )
 
         self._label(opt, "页码范围").grid(row=3, column=0, padx=(14, 4), pady=(2, 10), sticky="e")
         self.pages_entry = ctk.CTkEntry(
-            opt, placeholder_text="全部，或如 1-5,8", width=130, height=30,
+            opt, placeholder_text="全部，或如 1-5,8", width=152, height=30,
             fg_color=WHITE, border_color=LINE, border_width=1,
             text_color=INK, placeholder_text_color=FAINT,
             corner_radius=8, font=self.f_body,
@@ -1177,7 +1212,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             row=3, column=4, padx=(12, 4), pady=(2, 10), sticky="e"
         )
         self.output_mode_var = ctk.StringVar(value="双语 + 中文")
-        self._menu(opt, self.output_mode_var, list(OUTPUT_MODES), 132).grid(
+        self._menu(opt, self.output_mode_var, list(OUTPUT_MODES), 140).grid(
             row=3, column=5, padx=(4, 14), pady=(2, 10), sticky="w"
         )
 
