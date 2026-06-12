@@ -1025,7 +1025,22 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if self._pending_scale == self._ui_scale:
             return
         self._ui_scale = self._pending_scale
-        ctk.set_widget_scaling(self._ui_scale)
+        # Cover the window with a flat ivory curtain while the whole tree
+        # re-lays out (~0.4s): one clean swap instead of piecemeal ghosting.
+        # (WM_SETREDRAW freezing breaks Tk's internal buffer — don't.)
+        curtain = ctk.CTkFrame(self, fg_color=IVORY, corner_radius=0)
+        ctk.CTkLabel(
+            curtain, text=f"{int(self._ui_scale * 100)}%",
+            font=self.f_title, text_color=FAINT,
+        ).place(relx=0.5, rely=0.45, anchor="center")
+        curtain.place(relx=0, rely=0, relwidth=1, relheight=1)
+        curtain.lift()
+        self.update_idletasks()      # paint the curtain first
+        try:
+            ctk.set_widget_scaling(self._ui_scale)
+            self.update_idletasks()  # settle the new layout beneath it
+        finally:
+            curtain.destroy()
 
     def _style_titlebar(self):
         """Match Win11 title bar to the ivory theme (no-op elsewhere)."""
