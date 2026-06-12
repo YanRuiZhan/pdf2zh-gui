@@ -1177,22 +1177,24 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             command=self._delete_profile,
         ).pack(side="left", padx=(6, 0))
 
+        # row 2 — what to produce: languages + output flavor
         self._label(opt, "源语言").grid(row=2, column=0, padx=(14, 4), pady=8, sticky="e")
         self.lang_in_var = ctk.StringVar(value="English")
-        self._menu(opt, self.lang_in_var, list(LANGS), 124).grid(
+        self._menu(opt, self.lang_in_var, list(LANGS), 152).grid(
             row=2, column=1, padx=4, pady=8, sticky="w"
         )
         self._label(opt, "目标语言").grid(row=2, column=2, padx=(12, 4), pady=8, sticky="e")
         self.lang_out_var = ctk.StringVar(value="简体中文")
-        self._menu(opt, self.lang_out_var, list(LANGS), 124).grid(
+        self._menu(opt, self.lang_out_var, list(LANGS), 152).grid(
             row=2, column=3, padx=4, pady=8, sticky="w"
         )
-        self._label(opt, "并发线程").grid(row=2, column=4, padx=(12, 4), pady=8, sticky="e")
-        self.thread_var = ctk.StringVar(value="4")
-        self._menu(opt, self.thread_var, ["1", "2", "4", "8"], 96).grid(
+        self._label(opt, "输出文件").grid(row=2, column=4, padx=(12, 4), pady=8, sticky="e")
+        self.output_mode_var = ctk.StringVar(value="双语 + 中文")
+        self._menu(opt, self.output_mode_var, list(OUTPUT_MODES), 152).grid(
             row=2, column=5, padx=(4, 14), pady=8, sticky="w"
         )
 
+        # row 3 — how to run: scope, threads, cache toggle
         self._label(opt, "页码范围").grid(row=3, column=0, padx=(14, 4), pady=(2, 10), sticky="e")
         self.pages_entry = ctk.CTkEntry(
             opt, placeholder_text="全部，或如 1-5,8", width=152, height=30,
@@ -1201,20 +1203,18 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             corner_radius=8, font=self.f_body,
         )
         self.pages_entry.grid(row=3, column=1, padx=4, pady=(2, 10), sticky="w")
+        self._label(opt, "并发线程").grid(row=3, column=2, padx=(12, 4), pady=(2, 10), sticky="e")
+        self.thread_var = ctk.StringVar(value="4")
+        self._menu(opt, self.thread_var, ["1", "2", "4", "8"], 152).grid(
+            row=3, column=3, padx=4, pady=(2, 10), sticky="w"
+        )
         self.cache_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             opt, text="忽略翻译缓存", variable=self.cache_var,
             font=self.f_body, text_color=SLATE,
             fg_color=CLAY, hover_color=CLAY_DK, checkmark_color=WHITE,
             border_color="#B9B3A5", border_width=2, corner_radius=6,
-        ).grid(row=3, column=2, columnspan=2, padx=12, pady=(2, 10), sticky="w")
-        self._label(opt, "输出文件").grid(
-            row=3, column=4, padx=(12, 4), pady=(2, 10), sticky="e"
-        )
-        self.output_mode_var = ctk.StringVar(value="双语 + 中文")
-        self._menu(opt, self.output_mode_var, list(OUTPUT_MODES), 140).grid(
-            row=3, column=5, padx=(4, 14), pady=(2, 10), sticky="w"
-        )
+        ).grid(row=3, column=5, padx=(4, 14), pady=(2, 10), sticky="w")
 
         # output card
         out = self._card()
