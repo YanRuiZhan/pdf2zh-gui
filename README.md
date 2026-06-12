@@ -8,6 +8,9 @@
 
 - 拖拽或选择多个 PDF 文件
 - 支持页码范围、输出目录、输出文件类型和并发线程设置
+- 翻译注意事项：把自定义要求（默认「保留所有英文人名、地名不翻译」）注入翻译提示词，自动记住上次填写内容
+- 单词速查：调用所选 AI 服务即时查词，支持英文/中文双向、音标和领域释义
+- Ctrl+滚轮 缩放整个界面（70%–160%），Ctrl+0 复原
 - 支持 OpenAI 兼容、Claude/Anthropic 兼容、DeepSeek、Gemini、智谱、SiliconFlow、Grok、Groq、Ollama、Azure OpenAI 等服务
 - 支持 LongCat 这类 Anthropic-compatible `/messages` 网关
 - 自动创建桌面快捷方式
@@ -80,10 +83,16 @@ LongCat / Claude 兼容服务可选：
 
 ```text
 %USERPROFILE%\.config\PDFMathTranslate\gui_services.json
+%USERPROFILE%\.config\PDFMathTranslate\gui_prefs.json
 %USERPROFILE%\.config\PDFMathTranslate\config.json
 ```
 
-这两个文件包含个人配置和密钥，不应提交到 GitHub。
+这些文件包含个人配置和密钥，不应提交到 GitHub。
+
+## 翻译注意事项与单词速查
+
+- **注意事项**：在「翻译设置」最后一行填写对 AI 的要求（多条用分号或换行分隔），会作为规则注入每次翻译的提示词。修改注意事项后同一文档会重新翻译（缓存按提示词区分），留空则使用 pdf2zh 原始提示词。
+- **单词速查**：在「单词速查」卡片输入英文或中文按 Enter，即用当前选中的 ★ AI 服务返回词典式释义。需要先配置一个自定义 AI 服务（google/bing 翻译不支持查词）。
 
 ## 说明
 
