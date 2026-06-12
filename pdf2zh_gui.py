@@ -990,8 +990,42 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._select_default_service()
         self.drop_target_register(DND_FILES)
         self.dnd_bind("<<Drop>>", self._on_drop)
+
+        # Ctrl+wheel zoom (debounced: a full re-scale costs ~0.4s)
+        self._ui_scale = 1.0
+        self._pending_scale = 1.0
+        self._scale_job = None
+        self.bind_all("<Control-MouseWheel>", self._on_ctrl_wheel)
+        self.bind_all("<Control-Key-0>", self._reset_scale)
+
         self.after(150, self._style_titlebar)
         self.after(100, self._poll)
+
+    # ---------- zoom (Ctrl+wheel) ----------
+    def _on_ctrl_wheel(self, event):
+        step = 0.1 if event.delta > 0 else -0.1
+        self._pending_scale = min(1.6, max(0.7, round(self._pending_scale + step, 2)))
+        self._schedule_scale()
+        return "break"
+
+    def _reset_scale(self, _e=None):
+        self._pending_scale = 1.0
+        self._schedule_scale()
+
+    def _schedule_scale(self):
+        if self._scale_job is not None:
+            self.after_cancel(self._scale_job)
+        self.status_label.configure(
+            text=f"界面缩放 {int(self._pending_scale * 100)}%（Ctrl+0 复原）"
+        )
+        self._scale_job = self.after(220, self._apply_scale)
+
+    def _apply_scale(self):
+        self._scale_job = None
+        if self._pending_scale == self._ui_scale:
+            return
+        self._ui_scale = self._pending_scale
+        ctk.set_widget_scaling(self._ui_scale)
 
     def _style_titlebar(self):
         """Match Win11 title bar to the ivory theme (no-op elsewhere)."""
