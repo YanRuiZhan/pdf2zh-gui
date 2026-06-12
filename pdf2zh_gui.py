@@ -504,7 +504,18 @@ class QueueLogHandler(logging.Handler):
 
 
 class FastScrollFrame(ctk.CTkScrollableFrame):
-    """CTkScrollableFrame with 3x wheel speed on Windows (delta/6 -> delta/2)."""
+    """CTkScrollableFrame: 3x wheel speed, scrollbar inset inside the border."""
+
+    def _create_grid(self):
+        super()._create_grid()
+        if self._orientation == "vertical":
+            # stock layout flushes the scrollbar against the right edge,
+            # painting over the rounded border; inset it like the canvas is
+            pad = self._apply_widget_scaling(
+                self._parent_frame.cget("corner_radius")
+                + self._parent_frame.cget("border_width")
+            )
+            self._scrollbar.grid_configure(padx=(0, pad))
 
     def _mouse_wheel_all(self, event):
         if sys.platform.startswith("win") and self.check_if_master_is_canvas(event.widget):
@@ -1182,7 +1193,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             bar, text="或将 PDF 拖入窗口任意位置", font=self.f_small, text_color=FAINT
         ).pack(side="right", padx=4)
 
-        self.file_frame = ctk.CTkScrollableFrame(
+        self.file_frame = FastScrollFrame(
             card, fg_color=WHITE, corner_radius=10, height=150,
             border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
