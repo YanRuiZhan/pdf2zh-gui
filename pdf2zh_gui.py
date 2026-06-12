@@ -9,6 +9,7 @@ import sys
 import threading
 import traceback
 from pathlib import Path
+from string import Template
 from urllib.parse import urlsplit
 
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -46,6 +47,30 @@ OUTPUT_MODES = {
     "仅中文": "mono",
 }
 KEYLESS_SERVICES = ("google", "bing")
+
+DEFAULT_NOTES = "保留所有英文人名、地名不翻译"
+
+# $lang_in/$lang_out/$text are substituted by pdf2zh; $notes by the GUI
+PROMPT_WITH_NOTES = Template(
+    "You are a professional, authentic machine translation engine. "
+    "Only Output the translated text, do not include any other text."
+    "\n\nTranslation notes (follow strictly):\n$notes\n\n"
+    "Translate the following markdown source text to $lang_out. "
+    "Keep the formula notation {v*} unchanged. "
+    "Output translation directly without any additional text."
+    "\n\nSource Text: $text\n\nTranslated Text:"
+)
+
+
+def build_prompt_template(notes: str):
+    """-> Template for pdf2zh, or None to use its stock prompt."""
+    notes = notes.strip()
+    if not notes:
+        return None
+    lines = "\n".join(
+        f"- {ln.strip()}" for ln in notes.splitlines() if ln.strip()
+    )
+    return Template(PROMPT_WITH_NOTES.safe_substitute({"notes": lines}))
 
 # (env_key, label, required, secret, default)
 SERVICE_SCHEMAS = {
@@ -413,6 +438,73 @@ def test_service(  # type: ignore[no-redef]
         )
 
 GUI_SERVICES_PATH = CONFIG_PATH.with_name("gui_services.json")
+GUI_PREFS_PATH = CONFIG_PATH.with_name("gui_prefs.json")
+
+
+def load_prefs() -> dict:
+    try:
+        return json.loads(GUI_PREFS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_prefs(prefs: dict):
+    try:
+        GUI_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        GUI_PREFS_PATH.write_text(
+            json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def quick_translate(stype: str, envs: dict, model: str, text: str,
+                    timeout: int = 25) -> str:
+    """One-shot dictionary-style lookup via the selected AI service."""
+    if not model:
+        raise ValueError("请先填写模型名称")
+    base, headers = _api_target(stype, envs)
+    ask = (
+        "你是英汉双向词典助手。解释下面的单词或短语：\n"
+        "- 英文输入：给出音标、词性和中文释义，最多列 3 个常用义项\n"
+        "- 中文输入：给出对应的英文表达和例句\n"
+        "- 若是专业术语，补充一句领域内含义\n"
+        "直接输出结果，不要寒暄，控制在 5 行以内。\n\n"
+        f"查询：{text}"
+    )
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": ask}],
+        "max_tokens": 500,
+        "temperature": 0,
+    }
+    with _http(timeout) as c:
+        if stype == "ollama":
+            r = c.post(f"{base}/api/chat",
+                       json={"model": model, "stream": False,
+                             "messages": payload["messages"]})
+            if r.status_code >= 400:
+                raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
+            return (r.json().get("message", {}).get("content") or "").strip()
+        if stype == "azure-openai":
+            ver = (envs.get("AZURE_OPENAI_API_VERSION") or "2024-06-01").strip()
+            url = f"{base}/openai/deployments/{model}/chat/completions?api-version={ver}"
+            r = c.post(url, headers=headers, json=payload)
+        elif stype in ("anthropic", "claudeliked") or "/anthropic" in base or "anthropic.com" in base:
+            r = c.post(f"{base}/messages", headers=headers, json=payload)
+        else:
+            r = c.post(f"{base}/chat/completions", headers=headers, json=payload)
+        if r.status_code >= 400:
+            raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
+        data = r.json()
+        if "choices" in data:  # OpenAI flavor
+            return (data["choices"][0]["message"]["content"] or "").strip()
+        parts = data.get("content") or []  # Anthropic flavor
+        if isinstance(parts, str):
+            return parts.strip()
+        return "".join(
+            p.get("text", "") if isinstance(p, dict) else str(p) for p in parts
+        ).strip()
 
 # ---- Anthropic palette ----
 IVORY = "#F0EEE6"      # window background
@@ -993,6 +1085,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             t.get("name") for t in cfg.get("translators", []) if t.get("name")
         ]
         self._profiles = load_profiles()
+        self._prefs = load_prefs()
 
         logging.basicConfig(level=logging.INFO)
         logging.getLogger("pdf2zh").addHandler(QueueLogHandler(self._q))
@@ -1097,6 +1190,20 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 service = f"{backend}:{model}" if model else backend
                 return service, dict(p["envs"])
         return sel, None
+
+    def _selected_ai_profile(self):
+        """-> (stype, envs, model) of the selected ★ profile, else None."""
+        sel = self.service_var.get()
+        if sel.startswith("★ "):
+            p = self._profile_by_display(sel[2:])
+            if p:
+                schema = SERVICE_SCHEMAS[p["type"]]
+                model_keys = [k for k, *_ in schema if k.endswith("_MODEL")]
+                model = next(
+                    (p["envs"][k] for k in model_keys if p["envs"].get(k)), ""
+                )
+                return p["type"], dict(p["envs"]), model
+        return None
 
     def _refresh_service_menu(self):
         self.service_menu.configure(values=self._service_options())
@@ -1276,6 +1383,23 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             border_color="#B9B3A5", border_width=2, corner_radius=6,
         ).grid(row=3, column=5, padx=(4, 14), pady=(2, 10), sticky="w")
 
+        # row 4 — translator guidance baked into the LLM prompt, persisted
+        self._label(opt, "注意事项").grid(
+            row=4, column=0, padx=(14, 4), pady=(2, 12), sticky="e"
+        )
+        self.notes_entry = ctk.CTkEntry(
+            opt, height=30, fg_color=WHITE, border_color=LINE, border_width=1,
+            text_color=INK, placeholder_text_color=FAINT,
+            corner_radius=8, font=self.f_body,
+            placeholder_text="告诉 AI 翻译时的要求，多条用分号隔开；留空则用默认提示词",
+        )
+        self.notes_entry.grid(
+            row=4, column=1, columnspan=5, padx=(4, 14), pady=(2, 12), sticky="ew"
+        )
+        saved_notes = self._prefs.get("notes", DEFAULT_NOTES)
+        if saved_notes:
+            self.notes_entry.insert(0, saved_notes)
+
         # output card
         out = self._card()
         ctk.CTkLabel(out, text="输出位置", font=self.f_section, text_color=INK).pack(
@@ -1300,6 +1424,41 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._ghost_btn(out, "浏览…", self._browse_out, width=72).pack(
             side="left", padx=(8, 14)
         )
+
+        # quick word lookup card (reuses the selected ★ AI service)
+        dic = self._card()
+        dic_top = ctk.CTkFrame(dic, fg_color="transparent")
+        dic_top.pack(fill="x", padx=14, pady=(10, 4))
+        ctk.CTkLabel(dic_top, text="单词速查", font=self.f_section, text_color=INK).pack(
+            side="left"
+        )
+        ctk.CTkLabel(
+            dic_top, text="用上方选中的 AI 服务查词，Enter 直接查询",
+            font=self.f_small, text_color=FAINT,
+        ).pack(side="right")
+        dic_bar = ctk.CTkFrame(dic, fg_color="transparent")
+        dic_bar.pack(fill="x", padx=14, pady=(0, 8))
+        self.dict_entry = ctk.CTkEntry(
+            dic_bar, height=32, fg_color=WHITE, border_color=LINE, border_width=1,
+            text_color=INK, placeholder_text_color=FAINT,
+            corner_radius=8, font=self.f_body,
+            placeholder_text="输入英文单词 / 短语 / 中文词…",
+        )
+        self.dict_entry.pack(side="left", fill="x", expand=True)
+        self.dict_entry.bind("<Return>", lambda _e: self._dict_lookup())
+        self.dict_btn = self._ghost_btn(
+            dic_bar, "查询", self._dict_lookup, accent=True, width=84
+        )
+        self.dict_btn.configure(height=32)
+        self.dict_btn.pack(side="left", padx=(8, 0))
+        self.dict_box = ctk.CTkTextbox(
+            dic, height=96, state="disabled", wrap="word",
+            fg_color=WHITE, text_color=FAINT, font=self.f_body,
+            corner_radius=10, border_width=1, border_color=LINE,
+            scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
+        )
+        self.dict_box.pack(fill="x", padx=14, pady=(0, 12))
+        self._set_dict_text("查询结果会显示在这里", FAINT)
 
         # run card
         run = self._card()
@@ -1341,8 +1500,45 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         card.pack(fill="x", padx=PADX, pady=6)
         opt.pack(fill="x", padx=PADX, pady=6)
         out.pack(fill="x", padx=PADX, pady=6)
+        dic.pack(fill="x", padx=PADX, pady=6)
         run.pack(fill="x", padx=PADX, pady=6)
         self.log_box.pack(fill="x", padx=PADX, pady=(2, 14))
+
+    # ---------- quick dictionary ----------
+    def _set_dict_text(self, text, color=INK):
+        self.dict_box.configure(state="normal")
+        self.dict_box.delete("0.0", "end")
+        self.dict_box.insert("0.0", text)
+        self.dict_box.configure(text_color=color, state="disabled")
+
+    def _dict_lookup(self):
+        query = self.dict_entry.get().strip()
+        if not query:
+            self._set_dict_text("请输入要查询的单词或短语", FAINT)
+            return
+        prof = self._selected_ai_profile()
+        if prof is None:
+            self._set_dict_text(
+                "单词速查需要 AI 服务：请在「翻译服务」选择带 ★ 的自定义服务"
+                "（google/bing 不支持）", COLOR_FAIL,
+            )
+            return
+        stype, envs, model = prof
+        self.dict_btn.configure(state="disabled")
+        self._set_dict_text(f"⏳ 正在查询 {query} ...", SLATE)
+        threading.Thread(
+            target=self._do_dict_lookup, args=(stype, envs, model, query),
+            daemon=True,
+        ).start()
+
+    def _do_dict_lookup(self, stype, envs, model, query):
+        try:
+            result = quick_translate(stype, envs, model, query)
+            if not result:
+                raise ValueError("接口返回为空")
+            self._q.put(("dict_result", f"{query}\n\n{result}", INK))
+        except Exception as e:
+            self._q.put(("dict_result", f"查询失败：{e}", COLOR_FAIL))
 
     # ---------- file list ----------
     def _on_drop(self, event):
@@ -1434,6 +1630,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 return
         service, envs = self._selected_service()
 
+        notes = self.notes_entry.get().strip()
+        self._prefs["notes"] = notes
+        save_prefs(self._prefs)
+
         params = {
             "pages": pages,
             "lang_in": LANGS[self.lang_in_var.get()],
@@ -1444,6 +1644,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             "output": output,
             "output_mode": OUTPUT_MODES[self.output_mode_var.get()],
             "ignore_cache": self.cache_var.get(),
+            "prompt": build_prompt_template(notes),
         }
         files = list(self._files)
         for p in files:
@@ -1538,6 +1739,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                         cancellation_event=cancel,
                         model=App._model,
                         ignore_cache=params["ignore_cache"],
+                        prompt=params["prompt"],
                     )
                     kept = self._write_selected_outputs(
                         out_dir, Path(f).stem, s_mono, s_dual, params["output_mode"]
@@ -1587,6 +1789,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         elif kind == "done_dir":
             self._out_dirs.add(ev[1])
             self.open_btn.configure(state="normal")
+        elif kind == "dict_result":
+            self._set_dict_text(ev[1], ev[2])
+            self.dict_btn.configure(state="normal")
         elif kind == "all_done":
             self._set_running(False)
             self.progress.set(1 if self._out_dirs else 0)
