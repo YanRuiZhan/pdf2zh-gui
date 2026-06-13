@@ -1309,7 +1309,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._is_scaling = False
         self.bind_all("<Control-MouseWheel>", self._on_ctrl_wheel)
         self.bind_all("<Control-Key-0>", self._reset_scale)
-        self.bind("<Configure>", self._schedule_geometry_save)
+        self.bind("<Configure>", self._schedule_geometry_save, add="+")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.after(150, self._style_titlebar)
@@ -1337,6 +1337,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             return
         self._ui_scale = self._pending_scale
         self._close_dropdowns()
+        self._sync_ctk_window_size()
         if self._geometry_job is not None:
             self.after_cancel(self._geometry_job)
             self._geometry_job = None
@@ -1372,6 +1373,17 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if getattr(self, "_geometry_job", None) is not None:
             self.after_cancel(self._geometry_job)
         self._geometry_job = self.after(450, self._save_ui_prefs)
+
+    def _sync_ctk_window_size(self):
+        try:
+            self.update_idletasks()
+            width = self.winfo_width()
+            height = self.winfo_height()
+            if width > 1 and height > 1:
+                self._current_width = self._reverse_window_scaling(width)
+                self._current_height = self._reverse_window_scaling(height)
+        except Exception:
+            pass
 
     def _close_dropdowns(self, widget=None):
         widget = widget or self
