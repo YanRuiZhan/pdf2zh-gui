@@ -27,6 +27,8 @@ import customtkinter as ctk
 from tkinter import filedialog
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+TITLE_ICON_PATH = Path(__file__).with_name("star.ico")
+TITLE_ICON_PNG_PATH = Path(__file__).with_name("star.png")
 APP_ICON_PATH = Path(__file__).with_name("pdf_translate_icon_full.ico")
 CONFIG_PATH = Path.home() / ".config" / "PDFMathTranslate" / "config.json"
 
@@ -530,6 +532,30 @@ def event_has_control(event) -> bool:
     return bool(getattr(event, "state", 0) & 0x0004)
 
 
+def set_window_icon(window, set_default=False):
+    if TITLE_ICON_PNG_PATH.exists():
+        try:
+            photo = tk.PhotoImage(file=str(TITLE_ICON_PNG_PATH))
+            refs = getattr(window, "_title_icon_refs", [])
+            refs.append(photo)
+            window._title_icon_refs = refs
+            window.iconphoto(set_default, photo)
+        except Exception:
+            pass
+    icon_path = TITLE_ICON_PATH if TITLE_ICON_PATH.exists() else APP_ICON_PATH
+    if not icon_path.exists():
+        return
+    try:
+        window.iconbitmap(str(icon_path))
+    except Exception:
+        pass
+    if set_default:
+        try:
+            window.iconbitmap(default=str(icon_path))
+        except Exception:
+            pass
+
+
 def load_config() -> dict:
     try:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -978,16 +1004,24 @@ class PrettyOptionMenu(ctk.CTkFrame):
 class ServiceDialog(ctk.CTkToplevel):
     """Add / edit an AI translation service profile."""
 
+    def iconbitmap(self, bitmap=None, default=None):
+        if bitmap and "CustomTkinter_icon_Windows.ico" in str(bitmap):
+            self._ignored_default_icon = True
+            return None
+        return super().iconbitmap(bitmap, default=default)
+
     def __init__(self, master, on_save, profile=None):
         super().__init__(master, fg_color=IVORY)
+        self._ignored_default_icon = False
         self.on_save = on_save
         self.profile = profile or {}
         self.title("编辑服务" if profile else "添加服务")
+        self._set_icon_safe()
+        self.after(240, self._set_icon_safe)
         self.geometry("520x600")
         self.minsize(520, 480)
         self.transient(master)
         self.grab_set()
-        self.after(320, self._set_icon_safe)
 
         f = master.f_body
         self._rows: list[tuple] = []
@@ -1040,11 +1074,7 @@ class ServiceDialog(ctk.CTkToplevel):
         self._render_fields()
 
     def _set_icon_safe(self):
-        if APP_ICON_PATH.exists():
-            try:
-                self.iconbitmap(str(APP_ICON_PATH))
-            except Exception:
-                pass
+        set_window_icon(self)
 
     def _build_bar(self):
         bar = self._bar
@@ -1263,12 +1293,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         super().__init__(fg_color=IVORY)
         self.TkdndVersion = TkinterDnD._require(self)
 
-        self.title("PDF Translator · pdf2zh")
-        if APP_ICON_PATH.exists():
-            try:
-                self.iconbitmap(str(APP_ICON_PATH))
-            except Exception:
-                pass
+        self.title("PDF Translator")
+        set_window_icon(self, set_default=True)
         self._prefs = load_prefs()
         saved_scale = float(self._prefs.get("ui_scale", 1.0) or 1.0)
         saved_scale = min(1.6, max(0.7, round(saved_scale, 2)))

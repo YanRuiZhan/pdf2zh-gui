@@ -112,4 +112,5 @@ LongCat / Claude 兼容服务可选：
 - `PDF翻译.bat`：本地启动脚本
 - `install.ps1`：Windows 一键安装脚本
 - `requirements.txt`：依赖列表
-- `pdf_translate_icon_full.ico` / `pdf_translate_icon_full.png`：应用和快捷方式图标
+- `star.ico` / `star.png`：窗口标题栏图标
+- `pdf_translate_icon_full.ico` / `pdf_translate_icon_full.png`：桌面快捷方式图标
