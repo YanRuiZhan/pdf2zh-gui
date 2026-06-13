@@ -83,9 +83,14 @@ function New-DesktopShortcut {
     }
 
     $desktop = [Environment]::GetFolderPath("DesktopDirectory")
-    $shortcutPath = Join-Path $desktop "PDF翻译.lnk"
+    $shortcutPath = Join-Path $desktop "PDF Translator.lnk"
+    $legacyShortcutPath = Join-Path $desktop "PDF翻译.lnk"
     $scriptPath = Join-Path $InstallPath "pdf2zh_gui.py"
     $iconPath = Join-Path $InstallPath "pdf_translate_icon_full.ico"
+
+    if (Test-Path -LiteralPath $legacyShortcutPath) {
+        Remove-Item -LiteralPath $legacyShortcutPath -Force
+    }
 
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
@@ -114,5 +119,5 @@ New-DesktopShortcut -InstallPath $InstallDir -PythonExe $pythonExe
 Write-Host ""
 Write-Host "pdf2zh-gui 已安装完成。"
 Write-Host "安装目录: $InstallDir"
-Write-Host "桌面快捷方式: PDF翻译.lnk"
+Write-Host "桌面快捷方式: PDF Translator.lnk"
 Write-Host "首次运行后，请在 GUI 内添加自己的翻译服务配置。"

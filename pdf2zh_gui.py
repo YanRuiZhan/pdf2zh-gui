@@ -132,10 +132,10 @@ SERVICE_SCHEMAS = {
     ],
 }
 SERVICE_TYPE_LABELS = {
-    "openailiked": "自定义 · OpenAI 兼容",
-    "anthropic": "Anthropic Claude",
+    "openai": "OpenAI 官方",
+    "anthropic": "Claude 官方",
+    "openailiked": "OpenAI 兼容",
     "claudeliked": "Claude 兼容",
-    "openai": "OpenAI",
     "deepseek": "DeepSeek",
     "gemini": "Google Gemini",
     "zhipu": "智谱 GLM",
@@ -441,13 +441,20 @@ def test_service(  # type: ignore[no-redef]
 
 GUI_SERVICES_PATH = CONFIG_PATH.with_name("gui_services.json")
 GUI_PREFS_PATH = CONFIG_PATH.with_name("gui_prefs.json")
+DEFAULT_GUI_PREFS_PATH = Path(__file__).with_name("default_gui_prefs.json")
 
 
 def load_prefs() -> dict:
+    prefs = {}
     try:
-        return json.loads(GUI_PREFS_PATH.read_text(encoding="utf-8"))
+        prefs.update(json.loads(DEFAULT_GUI_PREFS_PATH.read_text(encoding="utf-8")))
     except Exception:
-        return {}
+        pass
+    try:
+        prefs.update(json.loads(GUI_PREFS_PATH.read_text(encoding="utf-8")))
+    except Exception:
+        pass
+    return prefs
 
 
 def save_prefs(prefs: dict):
@@ -1013,15 +1020,23 @@ class ServiceDialog(ctk.CTkToplevel):
     def __init__(self, master, on_save, profile=None):
         super().__init__(master, fg_color=IVORY)
         self._ignored_default_icon = False
+        self.master_ref = master
+        self._geometry_job = None
         self.on_save = on_save
         self.profile = profile or {}
         self.title("编辑服务" if profile else "添加服务")
         self._set_icon_safe()
         self.after(240, self._set_icon_safe)
-        self.geometry("520x600")
+        saved_geometry = getattr(master, "_prefs", {}).get("service_dialog_geometry")
+        if isinstance(saved_geometry, str) and re.match(r"^\d+x\d+[+-]\d+[+-]\d+$", saved_geometry):
+            self.geometry(saved_geometry)
+        else:
+            self.geometry("520x600")
         self.minsize(520, 480)
         self.transient(master)
         self.grab_set()
+        self.bind("<Configure>", self._schedule_geometry_save, add="+")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         f = master.f_body
         self._rows: list[tuple] = []
@@ -1057,8 +1072,6 @@ class ServiceDialog(ctk.CTkToplevel):
                                          border_width=1, border_color=LINE)
         self.fields_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
-        self.master_ref = master
-
         self._bar = ctk.CTkFrame(self, fg_color="transparent")
         self._bar.pack(fill="x", padx=20, pady=(0, 4))
         self._build_bar()
@@ -1075,6 +1088,36 @@ class ServiceDialog(ctk.CTkToplevel):
 
     def _set_icon_safe(self):
         set_window_icon(self)
+
+    def _schedule_geometry_save(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        if self._geometry_job is not None:
+            self.after_cancel(self._geometry_job)
+        self._geometry_job = self.after(450, self._save_geometry_pref)
+
+    def _save_geometry_pref(self):
+        self._geometry_job = None
+        try:
+            geometry = self.geometry()
+            if re.match(r"^\d+x\d+[+-]\d+[+-]\d+$", geometry):
+                self.master_ref._prefs["service_dialog_geometry"] = geometry
+                save_prefs(self.master_ref._prefs)
+        except Exception:
+            pass
+
+    def _on_close(self):
+        self.destroy()
+
+    def destroy(self):
+        if getattr(self, "_geometry_job", None) is not None:
+            try:
+                self.after_cancel(self._geometry_job)
+            except Exception:
+                pass
+            self._geometry_job = None
+        self._save_geometry_pref()
+        super().destroy()
 
     def _build_bar(self):
         bar = self._bar

@@ -19,6 +19,14 @@
 - 自动创建桌面快捷方式
 - GUI 内管理模型服务配置，API Key 只保存在本机用户配置目录
 
+## 界面预览
+
+![PDF 翻译](docs/screenshots/pdf-translate.png)
+
+![单词速查](docs/screenshots/word-lookup.png)
+
+![翻译设置](docs/screenshots/translation-settings.png)
+
 ## 一键安装
 
 在 Windows PowerShell 中运行：
@@ -31,7 +39,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 
 - 下载本仓库到 `%LOCALAPPDATA%\pdf2zh-gui`
 - 安装 `requirements.txt` 中的 Python 依赖
-- 在桌面创建 `PDF翻译.lnk`
+- 在桌面创建 `PDF Translator.lnk`
 - 使用项目内置图标
 
 如果你想指定 Python，可先设置：
@@ -53,7 +61,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 请执行：
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/YanRuiZhan/pdf2zh-gui/main/install.ps1 | iex"
 
-安装完成后，确认桌面存在“PDF翻译”快捷方式，并告诉我安装目录。
+安装完成后，确认桌面存在“PDF Translator”快捷方式，并告诉我安装目录。
 ```
 
 ## 手动运行
@@ -68,7 +76,7 @@ python pdf2zh_gui.py
 也可以双击：
 
 ```text
-PDF翻译.bat
+pdf_translator.bat
 ```
 
 ## 配置翻译服务
@@ -109,8 +117,9 @@ LongCat / Claude 兼容服务可选：
 ## 文件
 
 - `pdf2zh_gui.py`：主程序
-- `PDF翻译.bat`：本地启动脚本
+- `pdf_translator.bat`：本地启动脚本
 - `install.ps1`：Windows 一键安装脚本
 - `requirements.txt`：依赖列表
+- `default_gui_prefs.json`：默认 GUI 偏好设置，不包含 API Key 或服务地址
 - `star.ico` / `star.png`：窗口标题栏图标
 - `pdf_translate_icon_full.ico` / `pdf_translate_icon_full.png`：桌面快捷方式图标

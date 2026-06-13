@@ -13,6 +13,7 @@ env/
 # User-local pdf2zh / GUI configuration. Do not commit API keys.
 config.json
 gui_services.json
+gui_prefs.json
 *.local.json
 
 # Input and generated documents.
