@@ -1,16 +1,19 @@
 # pdf2zh-gui
 
-一个基于 [pdf2zh](https://github.com/Byaidu/PDFMathTranslate) 的 Windows 桌面 GUI，用来把英文 PDF 文献翻译成中文并输出双语 PDF / 纯译文 PDF。
+一个基于 [pdf2zh](https://github.com/Byaidu/PDFMathTranslate) 的 Windows 桌面 GUI（应用名：PDF Translator），用来把英文 PDF 文献翻译成中文并输出双语 PDF / 纯译文 PDF。
 
 项目重点是双击即用：不需要启动 Web 服务，也不需要浏览器页面。
 
 ## 功能
 
 - 拖拽或选择多个 PDF 文件
+- 主界面分为「PDF 翻译」「单词速查」「翻译设置」三个选项卡
 - 支持页码范围、输出目录、输出文件类型和并发线程设置
 - 翻译注意事项：把自定义要求（默认「保留所有英文人名、地名不翻译」）注入翻译提示词，自动记住上次填写内容
-- 单词速查：调用所选 AI 服务即时查词，支持英文/中文双向、音标和领域释义
-- Ctrl+滚轮 缩放整个界面（70%–160%），Ctrl+0 复原
+- 单词速查：调用所选 AI 服务即时查词，支持英文/中文双向、音标和领域释义，结果区加高便于阅读
+- 模型列表支持「获取可用模型」后通过右侧下拉选择；长列表会限高并滚动，不会自动覆盖输入框
+- Ctrl+滚轮 缩放整个界面（70%–160%），Ctrl+0 复原；自动记住缩放比例和窗口尺寸
+- 自动保存翻译服务、语言、输出模式、页码、线程、缓存、注意事项和输出目录等设置
 - 支持 OpenAI 兼容、Claude/Anthropic 兼容、DeepSeek、Gemini、智谱、SiliconFlow、Grok、Groq、Ollama、Azure OpenAI 等服务
 - 支持 LongCat 这类 Anthropic-compatible `/messages` 网关
 - 自动创建桌面快捷方式
@@ -109,4 +112,4 @@ LongCat / Claude 兼容服务可选：
 - `PDF翻译.bat`：本地启动脚本
 - `install.ps1`：Windows 一键安装脚本
 - `requirements.txt`：依赖列表
-- `pdf_translate_icon_120.ico`：应用和快捷方式图标
+- `pdf_translate_icon_full.ico` / `pdf_translate_icon_full.png`：应用和快捷方式图标

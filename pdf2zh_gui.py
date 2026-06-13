@@ -22,12 +22,12 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 import tkinter.font as tkfont
+import tkinter as tk
 import customtkinter as ctk
 from tkinter import filedialog
-from customtkinter.windows.widgets.core_widget_classes import DropdownMenu
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-APP_ICON_PATH = Path(__file__).with_name("pdf_translate_icon_120.ico")
+APP_ICON_PATH = Path(__file__).with_name("pdf_translate_icon_full.ico")
 CONFIG_PATH = Path.home() / ".config" / "PDFMathTranslate" / "config.json"
 
 LANGS = {
@@ -621,6 +621,174 @@ class FastScrollFrame(ctk.CTkScrollableFrame):
             super()._mouse_wheel_all(event)
 
 
+class ScrollDropdown:
+    """Small scrollable popup used by PrettyOptionMenu for long model lists."""
+
+    def __init__(self, owner, values, command, font=None, visible_rows=6):
+        self.owner = owner
+        self.values = list(values)
+        self.command = command
+        self.font = font
+        self.visible_rows = visible_rows
+        self._popup = None
+        self._scroll = None
+        self._outside_bind = None
+
+    def configure(self, values=None):
+        if values is not None:
+            self.values = list(values)
+
+    def close(self):
+        if self._popup is not None:
+            try:
+                self._popup.destroy()
+            except Exception:
+                pass
+            self._popup = None
+            self._scroll = None
+        if self._outside_bind is not None:
+            try:
+                self.owner.winfo_toplevel().unbind("<Button-1>", self._outside_bind)
+            except Exception:
+                pass
+            self._outside_bind = None
+
+    def toggle(self, x, y, width):
+        if self._popup is not None:
+            self.close()
+            return
+        self.open(x, y, width)
+
+    def open(self, x, y, width):
+        self.close()
+        top = self.owner.winfo_toplevel()
+        row_h = 56
+        visible = max(1, min(self.visible_rows, len(self.values) or 1))
+        height = visible * row_h + 8
+        width = max(width, 160)
+        popup = tk.Toplevel(top)
+        self._popup = popup
+        popup.overrideredirect(True)
+        popup.transient(top)
+        popup.configure(bg=WHITE)
+        owner_x, owner_y = x, y - self.owner.winfo_height()
+        try:
+            top.update_idletasks()
+            self.owner.update_idletasks()
+            screen_h = top.winfo_screenheight()
+            screen_w = top.winfo_screenwidth()
+            owner_x = self.owner.winfo_rootx()
+            owner_y = self.owner.winfo_rooty()
+        except Exception:
+            screen_h, screen_w = 10_000, 10_000
+        below_y = owner_y + self.owner.winfo_height()
+        above_y = owner_y - height
+        if below_y + height <= screen_h - 8:
+            popup_y = below_y
+        else:
+            popup_y = max(8, above_y)
+        popup_x = min(max(8, owner_x), max(8, screen_w - width - 8))
+        if popup_x <= 8 and owner_x > 40:
+            popup_x = owner_x
+        if popup_y <= 8 and below_y > 40:
+            popup_y = below_y
+        geom = f"{width}x{height}+{popup_x}+{popup_y}"
+        popup.geometry(geom)
+        needs_scroll = len(self.values) > self.visible_rows
+        shell = ctk.CTkFrame(
+            popup, width=width, height=height, fg_color=WHITE,
+            corner_radius=8, border_width=1, border_color=LINE,
+        )
+        shell.pack(fill="both", expand=True)
+        shell.pack_propagate(False)
+        body = ctk.CTkFrame(shell, fg_color=WHITE, corner_radius=8)
+        body.pack(fill="both", expand=True, padx=4, pady=4)
+        if needs_scroll:
+            canvas = tk.Canvas(
+                body, bg=WHITE, highlightthickness=0, bd=0,
+                yscrollincrement=row_h,
+            )
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar = ctk.CTkScrollbar(
+                body, width=12, command=canvas.yview,
+                button_color="#D8D3C6", button_hover_color="#C6BFAF",
+            )
+            scrollbar.pack(side="right", fill="y", padx=(4, 0))
+            canvas.configure(yscrollcommand=scrollbar.set)
+            frame = ctk.CTkFrame(canvas, fg_color=WHITE, corner_radius=0)
+            window_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+            self._scroll = canvas
+        else:
+            canvas = None
+            frame = body
+            window_id = None
+            self._scroll = None
+
+        values = self.values or [""]
+        for value in values:
+            btn = ctk.CTkButton(
+                frame, text=value, anchor="w", height=row_h, font=self.font,
+                fg_color="transparent", hover_color=IVORY, text_color=INK,
+                corner_radius=6,
+                command=lambda v=value: self._select(v),
+            )
+            btn.pack(fill="x", padx=4, pady=1)
+            btn.bind("<MouseWheel>", self._on_wheel, add="+")
+
+        widgets = [popup, shell, body, frame]
+        if canvas is not None:
+            def sync_scroll_region(_e=None):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.itemconfigure(window_id, width=canvas.winfo_width())
+
+            frame.bind("<Configure>", sync_scroll_region, add="+")
+            canvas.bind("<Configure>", sync_scroll_region, add="+")
+            widgets.append(canvas)
+
+        for widget in widgets:
+            widget.bind("<MouseWheel>", self._on_wheel, add="+")
+            widget.bind("<Escape>", lambda _e: self.close(), add="+")
+        try:
+            popup.attributes("-topmost", True)
+            popup.lift()
+            popup.focus_force()
+            popup.after_idle(lambda g=geom: popup.geometry(g))
+            popup.after(80, lambda g=geom: popup.geometry(g))
+        except Exception:
+            pass
+        self._outside_bind = top.bind("<Button-1>", self._maybe_close_from_click, add="+")
+
+    def _select(self, value):
+        self.close()
+        if value:
+            self.command(value)
+
+    def _on_wheel(self, event):
+        if self._scroll is not None:
+            try:
+                self._scroll.yview_scroll(-int(event.delta / 120), "units")
+            except Exception:
+                pass
+        return "break"
+
+    def _maybe_close_from_click(self, event):
+        popup = self._popup
+        if popup is None:
+            return
+        widget = event.widget
+        popup_path = str(popup)
+        owner_path = str(self.owner)
+        widget_path = str(widget)
+        if (
+            widget_path == popup_path
+            or widget_path.startswith(popup_path + ".")
+            or widget_path == owner_path
+            or widget_path.startswith(owner_path + ".")
+        ):
+            return
+        self.close()
+
+
 class PrettyOptionMenu(ctk.CTkFrame):
     """Select-style dropdown: left-aligned value, inline chevron, whole-row click."""
 
@@ -639,15 +807,15 @@ class PrettyOptionMenu(ctk.CTkFrame):
         self._values = list(values)
         self._command = command
         self._state = state
+        self._font = font
         self._trace_blocked = False
         self._trace_name = None
         self._current_value = variable.get() if variable is not None else (
             self._values[0] if self._values else ""
         )
 
-        self._dropdown = DropdownMenu(
-            master=self, values=self._values, command=self._select,
-            fg_color=WHITE, hover_color=IVORY, text_color=INK, font=font,
+        self._dropdown = ScrollDropdown(
+            owner=self, values=self._values, command=self._select, font=font,
         )
         # chevron packs first (side=right) so it stays visible at any width;
         # CTkLabel (unlike CTkButton) has no 140px default that breaks narrow menus
@@ -671,6 +839,11 @@ class PrettyOptionMenu(ctk.CTkFrame):
         self._apply_state_colors()
 
     def destroy(self):
+        if hasattr(self, "_dropdown"):
+            try:
+                self._dropdown.close()
+            except Exception:
+                pass
         if self._variable is not None and self._trace_name:
             self._variable.trace_remove("write", self._trace_name)
         super().destroy()
@@ -741,8 +914,9 @@ class PrettyOptionMenu(ctk.CTkFrame):
     def _on_click(self, _e=None):
         if self._state == "disabled":
             return
-        self._dropdown.open(
-            self.winfo_rootx(), self.winfo_rooty() + self.winfo_height()
+        self._dropdown.toggle(
+            self.winfo_rootx(), self.winfo_rooty() + self.winfo_height(),
+            self.winfo_width(),
         )
 
     def _select(self, value):
@@ -763,6 +937,7 @@ class ServiceDialog(ctk.CTkToplevel):
         self.minsize(520, 480)
         self.transient(master)
         self.grab_set()
+        self.after(320, self._set_icon_safe)
 
         f = master.f_body
         self._rows: list[tuple] = []
@@ -813,6 +988,13 @@ class ServiceDialog(ctk.CTkToplevel):
         self.err_box.pack(fill="x", padx=20, pady=(0, 8))
 
         self._render_fields()
+
+    def _set_icon_safe(self):
+        if APP_ICON_PATH.exists():
+            try:
+                self.iconbitmap(str(APP_ICON_PATH))
+            except Exception:
+                pass
 
     def _build_bar(self):
         bar = self._bar
@@ -911,10 +1093,9 @@ class ServiceDialog(ctk.CTkToplevel):
             self._after_safe(lambda: self._toggle_buttons(True))
 
     def _fill_model(self, models: list[str]):
-        """Refresh model dropdowns and put a useful default in empty entries."""
+        """Refresh model dropdowns without silently overwriting the entry."""
         schema = SERVICE_SCHEMAS[TYPE_LABEL_TO_KEY[self.type_var.get()]]
         model_keys = {k for k, *_ in schema if k.endswith("_MODEL")}
-        defaults = {k: default for k, _label, _required, _secret, default in schema}
         if not models:
             return
         for env_key, entry, _required in self._rows:
@@ -924,10 +1105,6 @@ class ServiceDialog(ctk.CTkToplevel):
                 if menu:
                     menu.configure(values=models, state="normal")
                     menu.set(cur if cur in models else "选择模型")
-                if not cur or cur == defaults.get(env_key, ""):
-                    self._set_model_entry(entry, models[0])
-                    if menu:
-                        menu.set(models[0])
 
     def _toggle_buttons(self, enabled):
         state = "normal" if enabled else "disabled"
@@ -1036,12 +1213,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         super().__init__(fg_color=IVORY)
         self.TkdndVersion = TkinterDnD._require(self)
 
-        self.title("PDF 翻译 · pdf2zh")
+        self.title("PDF Translator · pdf2zh")
         if APP_ICON_PATH.exists():
             try:
                 self.iconbitmap(str(APP_ICON_PATH))
             except Exception:
                 pass
+        self._prefs = load_prefs()
+        saved_scale = float(self._prefs.get("ui_scale", 1.0) or 1.0)
+        saved_scale = min(1.6, max(0.7, round(saved_scale, 2)))
+        ctk.set_widget_scaling(saved_scale)
         try:
             scale = self._get_window_scaling()
         except Exception:
@@ -1050,7 +1231,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         sw = int(self.winfo_screenwidth() / scale)
         h = max(560, min(780, sh - 120))
         x = max(0, (sw - 840) // 2)
-        self.geometry(f"840x{h}+{x}+24")
+        saved_geometry = self._prefs.get("window_geometry")
+        if isinstance(saved_geometry, str) and re.match(r"^\d+x\d+[+-]\d+[+-]\d+$", saved_geometry):
+            self.geometry(saved_geometry)
+        else:
+            self.geometry(f"840x{h}+{x}+24")
         self.minsize(620, 400)
 
         self._q = queue.Queue()
@@ -1085,8 +1270,6 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             t.get("name") for t in cfg.get("translators", []) if t.get("name")
         ]
         self._profiles = load_profiles()
-        self._prefs = load_prefs()
-
         logging.basicConfig(level=logging.INFO)
         logging.getLogger("pdf2zh").addHandler(QueueLogHandler(self._q))
 
@@ -1096,11 +1279,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.dnd_bind("<<Drop>>", self._on_drop)
 
         # Ctrl+wheel zoom (debounced: a full re-scale costs ~0.4s)
-        self._ui_scale = 1.0
-        self._pending_scale = 1.0
+        self._ui_scale = saved_scale
+        self._pending_scale = saved_scale
         self._scale_job = None
+        self._geometry_job = None
         self.bind_all("<Control-MouseWheel>", self._on_ctrl_wheel)
         self.bind_all("<Control-Key-0>", self._reset_scale)
+        self.bind("<Configure>", self._schedule_geometry_save)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.after(150, self._style_titlebar)
         self.after(100, self._poll)
@@ -1119,9 +1305,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _schedule_scale(self):
         if self._scale_job is not None:
             self.after_cancel(self._scale_job)
-        self.status_label.configure(
-            text=f"界面缩放 {int(self._pending_scale * 100)}%（Ctrl+0 复原）"
-        )
+        self._q.put((
+            "log",
+            f"界面缩放 {int(self._pending_scale * 100)}%（Ctrl+0 复原）",
+        ))
         self._scale_job = self.after(220, self._apply_scale)
 
     def _apply_scale(self):
@@ -1129,6 +1316,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if self._pending_scale == self._ui_scale:
             return
         self._ui_scale = self._pending_scale
+        self._save_ui_prefs()
         # Cover the window with a flat ivory curtain while the whole tree
         # re-lays out (~0.4s): one clean swap instead of piecemeal ghosting.
         # (WM_SETREDRAW freezing breaks Tk's internal buffer — don't.)
@@ -1146,13 +1334,42 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         finally:
             curtain.destroy()
 
+    def _schedule_geometry_save(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        if getattr(self, "_geometry_job", None) is not None:
+            self.after_cancel(self._geometry_job)
+        self._geometry_job = self.after(450, self._save_ui_prefs)
+
+    def _save_ui_prefs(self):
+        self._geometry_job = None
+        try:
+            geometry = self.geometry()
+            if re.match(r"^\d+x\d+[+-]\d+[+-]\d+$", geometry):
+                self._prefs["window_geometry"] = geometry
+            self._prefs["ui_scale"] = self._ui_scale
+            save_prefs(self._prefs)
+        except Exception:
+            pass
+
+    def _on_close(self):
+        if getattr(self, "_geometry_job", None) is not None:
+            try:
+                self.after_cancel(self._geometry_job)
+            except Exception:
+                pass
+            self._geometry_job = None
+        self._save_ui_prefs()
+        self.destroy()
+
     def _style_titlebar(self):
-        """Match Win11 title bar to the ivory theme (no-op elsewhere)."""
+        """Cream Win11 title bar to blend with the ivory theme (no-op elsewhere)."""
         try:
             import ctypes
 
             hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-            for attr, val in ((35, 0x00E6EEF0), (36, 0x001D1E1F)):  # caption, text (BGR)
+            # caption #FAF9F5 (PAPER cream), text #1F1E1D (INK) — values are BGR
+            for attr, val in ((35, 0x00F5F9FA), (36, 0x001D1E1F)):
                 v = ctypes.c_int(val)
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(
                     hwnd, attr, ctypes.byref(v), 4
@@ -1170,7 +1387,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _select_default_service(self):
         opts = self._service_options()
-        self.service_var.set(opts[0])
+        saved = self._prefs.get("service")
+        self.service_var.set(saved if saved in opts else opts[0])
+
+    def _on_service_selected(self, value):
+        self._prefs["service"] = value
+        self._save_settings_prefs()
 
     def _profile_by_display(self, display: str):
         return next((p for p in self._profiles if p["display"] == display), None)
@@ -1228,6 +1450,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         save_profiles(self._profiles)
         self._refresh_service_menu()
         self.service_var.set(f"★ {profile['display']}")
+        self._on_service_selected(self.service_var.get())
         self._log(f"已保存服务：{profile['display']}（{SERVICE_TYPE_LABELS[profile['type']]}）")
 
     def _delete_profile(self):
@@ -1240,6 +1463,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         save_profiles(self._profiles)
         self._refresh_service_menu()
         self._select_default_service()
+        self._on_service_selected(self.service_var.get())
         self._log(f"已删除服务：{name}")
 
     # ---------- styled widget helpers ----------
@@ -1269,24 +1493,49 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _build_ui(self, services):
         PADX = 16
 
-        # whole page scrolls; small heights just show the scrollbar
-        self.page = FastScrollFrame(
-            self, fg_color=IVORY, corner_radius=0,
-            scrollbar_button_color="#CDC8B9", scrollbar_button_hover_color="#B8B2A0",
-        )
-        self.page.pack(fill="both", expand=True)
+        ctk.CTkFrame(self, height=1, fg_color=LINE, corner_radius=0).pack(fill="x")
+        shell = ctk.CTkFrame(self, fg_color=IVORY, corner_radius=0)
+        shell.pack(fill="both", expand=True)
 
-        header = ctk.CTkFrame(self.page, fg_color="transparent")
+        header = ctk.CTkFrame(shell, fg_color="transparent")
         header.pack(fill="x", padx=PADX, pady=(14, 6))
         tbox = ctk.CTkFrame(header, fg_color="transparent")
         tbox.pack(side="left", padx=(4, 0))
-        ctk.CTkLabel(tbox, text="PDF 翻译", font=self.f_title, text_color=INK).pack(
+        ctk.CTkLabel(tbox, text="PDF Translator", font=self.f_title, text_color=INK).pack(
             anchor="w"
         )
         ctk.CTkLabel(
             tbox, text="英文文献 → 中文 · 本地运行 · pdf2zh 驱动",
             font=self.f_sub, text_color=FAINT,
         ).pack(anchor="w")
+        tabs = ctk.CTkFrame(
+            header, fg_color=BAR_BG, corner_radius=10, border_width=1,
+            border_color=LINE,
+        )
+        tabs.pack(side="right", padx=(12, 4), pady=2)
+        self._tab_btns = {}
+        for key, text in (
+            ("translate", "PDF 翻译"),
+            ("dict", "单词速查"),
+            ("settings", "翻译设置"),
+        ):
+            btn = ctk.CTkButton(
+                tabs, text=text, width=92, height=30, font=self.f_body,
+                fg_color="transparent", hover_color=GHOST_H, text_color=SLATE,
+                corner_radius=8, command=lambda k=key: self._show_tab(k),
+            )
+            btn.pack(side="left", padx=3, pady=3)
+            self._tab_btns[key] = btn
+
+        holder = ctk.CTkFrame(shell, fg_color="transparent")
+        holder.pack(fill="both", expand=True)
+        self._tab_pages = {
+            "translate": ctk.CTkFrame(holder, fg_color="transparent"),
+            "dict": ctk.CTkFrame(holder, fg_color="transparent"),
+            "settings": ctk.CTkFrame(holder, fg_color="transparent"),
+        }
+        self.page = self._tab_pages["translate"]
+        self._active_tab = None
 
         # file card (packed last so it absorbs shrink; bottom cards keep space)
         card = self._card()
@@ -1300,20 +1549,26 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             bar, text="或将 PDF 拖入窗口任意位置", font=self.f_small, text_color=FAINT
         ).pack(side="right", padx=4)
 
+        file_box = ctk.CTkFrame(
+            card, fg_color="transparent", height=92, corner_radius=0,
+        )
+        file_box.pack(fill="x", padx=12, pady=(0, 12))
+        file_box.pack_propagate(False)
         self.file_frame = FastScrollFrame(
-            card, fg_color=WHITE, corner_radius=10, height=150,
+            file_box, fg_color=WHITE, corner_radius=10, height=75,
             border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
         )
-        self.file_frame.pack(fill="x", padx=12, pady=(0, 12))
+        self.file_frame.pack(fill="both", expand=True)
         self._empty_hint = ctk.CTkLabel(
-            self.file_frame, text="将 PDF 拖到这里\n或点击上方「添加 PDF」",
+            self.file_frame, text="将 PDF 拖到这里，或点击上方「添加 PDF」",
             font=self.f_body, text_color=FAINT, justify="center",
         )
-        self._empty_hint.pack(pady=36)
+        self._empty_hint.pack(pady=18)
+        self.after(80, self._refresh_file_scrollbar)
 
         # settings card
-        opt = self._card()
+        opt = self._card(parent=self._tab_pages["settings"])
         opt.grid_columnconfigure((1, 3, 5), weight=1)
         ctk.CTkLabel(opt, text="翻译设置", font=self.f_section, text_color=INK).grid(
             row=0, column=0, columnspan=6, padx=14, pady=(10, 0), sticky="w"
@@ -1323,7 +1578,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         svc_box = ctk.CTkFrame(opt, fg_color="transparent")
         svc_box.grid(row=1, column=1, columnspan=5, padx=4, pady=8, sticky="w")
         self.service_var = ctk.StringVar(value="google")
-        self.service_menu = self._menu(svc_box, self.service_var, services, 240)
+        self.service_menu = PrettyOptionMenu(
+            svc_box, self.service_var, services, 240, font=self.f_body,
+            command=self._on_service_selected,
+        )
         self.service_menu.pack(side="left")
         ctk.CTkButton(
             svc_box, text="＋ 添加模型", width=92, height=30, font=self.f_body,
@@ -1346,17 +1604,26 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # row 2 — what to produce: languages + output flavor
         self._label(opt, "源语言").grid(row=2, column=0, padx=(14, 4), pady=8, sticky="e")
-        self.lang_in_var = ctk.StringVar(value="English")
+        self.lang_in_var = ctk.StringVar(
+            value=self._prefs.get("lang_in", "English")
+            if self._prefs.get("lang_in") in LANGS else "English"
+        )
         self._menu(opt, self.lang_in_var, list(LANGS), 152).grid(
             row=2, column=1, padx=4, pady=8, sticky="w"
         )
         self._label(opt, "目标语言").grid(row=2, column=2, padx=(12, 4), pady=8, sticky="e")
-        self.lang_out_var = ctk.StringVar(value="简体中文")
+        self.lang_out_var = ctk.StringVar(
+            value=self._prefs.get("lang_out", "简体中文")
+            if self._prefs.get("lang_out") in LANGS else "简体中文"
+        )
         self._menu(opt, self.lang_out_var, list(LANGS), 152).grid(
             row=2, column=3, padx=4, pady=8, sticky="w"
         )
         self._label(opt, "输出文件").grid(row=2, column=4, padx=(12, 4), pady=8, sticky="e")
-        self.output_mode_var = ctk.StringVar(value="双语 + 中文")
+        self.output_mode_var = ctk.StringVar(
+            value=self._prefs.get("output_mode", "双语 + 中文")
+            if self._prefs.get("output_mode") in OUTPUT_MODES else "双语 + 中文"
+        )
         self._menu(opt, self.output_mode_var, list(OUTPUT_MODES), 152).grid(
             row=2, column=5, padx=(4, 14), pady=8, sticky="w"
         )
@@ -1370,12 +1637,17 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             corner_radius=8, font=self.f_body,
         )
         self.pages_entry.grid(row=3, column=1, padx=4, pady=(2, 10), sticky="w")
+        if self._prefs.get("pages"):
+            self.pages_entry.insert(0, self._prefs["pages"])
         self._label(opt, "并发线程").grid(row=3, column=2, padx=(12, 4), pady=(2, 10), sticky="e")
-        self.thread_var = ctk.StringVar(value="4")
+        self.thread_var = ctk.StringVar(
+            value=self._prefs.get("thread", "4")
+            if self._prefs.get("thread") in {"1", "2", "4", "8"} else "4"
+        )
         self._menu(opt, self.thread_var, ["1", "2", "4", "8"], 152).grid(
             row=3, column=3, padx=4, pady=(2, 10), sticky="w"
         )
-        self.cache_var = ctk.BooleanVar(value=False)
+        self.cache_var = ctk.BooleanVar(value=bool(self._prefs.get("ignore_cache", False)))
         ctk.CTkCheckBox(
             opt, text="忽略翻译缓存", variable=self.cache_var,
             font=self.f_body, text_color=SLATE,
@@ -1405,7 +1677,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.CTkLabel(out, text="输出位置", font=self.f_section, text_color=INK).pack(
             side="left", padx=(14, 10), pady=12
         )
-        self.out_mode = ctk.StringVar(value="same")
+        self.out_mode = ctk.StringVar(
+            value=self._prefs.get("out_mode", "same")
+            if self._prefs.get("out_mode") in {"same", "custom"} else "same"
+        )
         rb_kw = dict(
             variable=self.out_mode, font=self.f_body, text_color=SLATE,
             fg_color=CLAY, hover_color=CLAY_DK, border_color="#B9B3A5",
@@ -1421,19 +1696,21 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             border_width=1, text_color=INK, corner_radius=8, font=self.f_body,
         )
         self.out_entry.pack(side="left", padx=2, fill="x", expand=True)
-        self._ghost_btn(out, "浏览…", self._browse_out, width=72).pack(
+        if self._prefs.get("out_dir"):
+            self.out_entry.insert(0, self._prefs["out_dir"])
+        self._ghost_btn(out, "▾", self._browse_out, width=44).pack(
             side="left", padx=(8, 14)
         )
 
         # quick word lookup card (reuses the selected ★ AI service)
-        dic = self._card()
+        dic = self._card(parent=self._tab_pages["dict"])
         dic_top = ctk.CTkFrame(dic, fg_color="transparent")
         dic_top.pack(fill="x", padx=14, pady=(10, 4))
         ctk.CTkLabel(dic_top, text="单词速查", font=self.f_section, text_color=INK).pack(
             side="left"
         )
         ctk.CTkLabel(
-            dic_top, text="用上方选中的 AI 服务查词，Enter 直接查询",
+            dic_top, text="使用翻译设置中的AI翻译服务，Enter快速查询",
             font=self.f_small, text_color=FAINT,
         ).pack(side="right")
         dic_bar = ctk.CTkFrame(dic, fg_color="transparent")
@@ -1452,7 +1729,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.dict_btn.configure(height=32)
         self.dict_btn.pack(side="left", padx=(8, 0))
         self.dict_box = ctk.CTkTextbox(
-            dic, height=96, state="disabled", wrap="word",
+            dic, height=288, state="disabled", wrap="word",
             fg_color=WHITE, text_color=FAINT, font=self.f_body,
             corner_radius=10, border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
@@ -1498,11 +1775,58 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._set_log_hint()
         # natural top-down flow inside the scrollable page
         card.pack(fill="x", padx=PADX, pady=6)
-        opt.pack(fill="x", padx=PADX, pady=6)
         out.pack(fill="x", padx=PADX, pady=6)
-        dic.pack(fill="x", padx=PADX, pady=6)
         run.pack(fill="x", padx=PADX, pady=6)
         self.log_box.pack(fill="x", padx=PADX, pady=(2, 14))
+        opt.pack(fill="x", padx=PADX, pady=12)
+        dic.pack(fill="x", padx=PADX, pady=12)
+        self._bind_setting_persistence()
+        self._show_tab("translate")
+
+    def _bind_setting_persistence(self):
+        for var in (
+            self.lang_in_var, self.lang_out_var, self.output_mode_var,
+            self.thread_var, self.cache_var, self.out_mode,
+        ):
+            var.trace_add("write", lambda *_: self._save_settings_prefs())
+        self.pages_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
+        self.notes_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
+        self.out_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
+
+    def _save_settings_prefs(self):
+        try:
+            self._prefs.update({
+                "service": self.service_var.get(),
+                "lang_in": self.lang_in_var.get(),
+                "lang_out": self.lang_out_var.get(),
+                "output_mode": self.output_mode_var.get(),
+                "pages": self.pages_entry.get().strip(),
+                "thread": self.thread_var.get(),
+                "ignore_cache": bool(self.cache_var.get()),
+                "notes": self.notes_entry.get().strip(),
+                "out_mode": self.out_mode.get(),
+                "out_dir": self.out_entry.get().strip(),
+            })
+            save_prefs(self._prefs)
+        except Exception:
+            pass
+
+    def _show_tab(self, key):
+        if key not in getattr(self, "_tab_pages", {}):
+            return
+        for tab_key, page in self._tab_pages.items():
+            if tab_key == key:
+                page.pack(fill="both", expand=True)
+            else:
+                page.pack_forget()
+        for tab_key, btn in self._tab_btns.items():
+            selected = tab_key == key
+            btn.configure(
+                fg_color=PAPER if selected else "transparent",
+                text_color=INK if selected else SLATE,
+                hover_color=PAPER if selected else GHOST_H,
+            )
+        self._active_tab = key
 
     # ---------- quick dictionary ----------
     def _set_dict_text(self, text, color=INK):
@@ -1581,6 +1905,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._files[p] = {"row": row, "status": status}
         if self._files:
             self._log(f"列表共 {len(self._files)} 个文件")
+        self.after(80, self._refresh_file_scrollbar)
 
     def _remove_file(self, path):
         if self._running:
@@ -1589,7 +1914,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if info:
             info["row"].destroy()
         if not self._files:
-            self._empty_hint.pack(pady=36)
+            self._empty_hint.pack(pady=18)
+        self.after(80, self._refresh_file_scrollbar)
 
     def _clear_files(self):
         if self._running:
@@ -1597,7 +1923,19 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         for info in self._files.values():
             info["row"].destroy()
         self._files.clear()
-        self._empty_hint.pack(pady=36)
+        self._empty_hint.pack(pady=18)
+        self.after(80, self._refresh_file_scrollbar)
+
+    def _refresh_file_scrollbar(self):
+        try:
+            self.file_frame.update_idletasks()
+            first, last = self.file_frame._parent_canvas.yview()
+            if first <= 0.0 and last >= 1.0:
+                self.file_frame._scrollbar.grid_remove()
+            else:
+                self.file_frame._scrollbar.grid()
+        except Exception:
+            pass
 
     def _set_status(self, path, text, color):
         info = self._files.get(path)
@@ -1611,6 +1949,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.out_mode.set("custom")
             self.out_entry.delete(0, "end")
             self.out_entry.insert(0, d)
+            self._save_settings_prefs()
 
     def _start(self):
         if self._running or not self._files:
@@ -1631,8 +1970,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         service, envs = self._selected_service()
 
         notes = self.notes_entry.get().strip()
-        self._prefs["notes"] = notes
-        save_prefs(self._prefs)
+        self._save_settings_prefs()
 
         params = {
             "pages": pages,
@@ -1817,7 +2155,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.log_box.delete("0.0", "end")
         self.log_box.insert(
             "0.0",
-            "暂无输出\n开始翻译后，这里会显示运行状态、输出文件和错误信息",
+            "暂无输出\n开始翻译后，这里会显示运行状态、输出文件和错误信息\nCtrl+滚轮以缩放界面",
         )
         self.log_box.configure(state="disabled")
 

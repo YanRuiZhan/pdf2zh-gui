@@ -85,7 +85,7 @@ function New-DesktopShortcut {
     $desktop = [Environment]::GetFolderPath("DesktopDirectory")
     $shortcutPath = Join-Path $desktop "PDF翻译.lnk"
     $scriptPath = Join-Path $InstallPath "pdf2zh_gui.py"
-    $iconPath = Join-Path $InstallPath "pdf_translate_icon_120.ico"
+    $iconPath = Join-Path $InstallPath "pdf_translate_icon_full.ico"
 
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
