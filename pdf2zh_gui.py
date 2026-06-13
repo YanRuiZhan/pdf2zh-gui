@@ -796,7 +796,6 @@ class ScrollDropdown:
         try:
             popup.attributes("-topmost", True)
             popup.lift()
-            popup.focus_force()
             popup.after_idle(lambda g=geom: popup.geometry(g))
             popup.after(80, lambda g=geom: popup.geometry(g))
         except Exception:
@@ -834,6 +833,10 @@ class ScrollDropdown:
         ):
             return
         self.close()
+        try:
+            widget.after_idle(lambda w=widget: w.focus_set())
+        except Exception:
+            pass
 
 
 class PrettyOptionMenu(ctk.CTkFrame):
