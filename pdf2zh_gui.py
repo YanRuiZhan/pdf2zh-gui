@@ -666,12 +666,21 @@ class ScrollDropdown:
             return
         self.open(x, y, width)
 
+    def _px(self, value):
+        try:
+            return max(1, int(round(self.owner._apply_widget_scaling(value))))
+        except Exception:
+            return max(1, int(round(value)))
+
     def open(self, x, y, width):
         self.close()
         top = self.owner.winfo_toplevel()
-        row_h = 56
+        row_h = 30
+        row_px = self._px(row_h)
+        row_gap = 2
+        chrome_px = self._px(14) + 8
         visible = max(1, min(self.visible_rows, len(self.values) or 1))
-        height = visible * row_h + 8
+        height = visible * (row_px + row_gap) + chrome_px
         width = max(width, 160)
         popup = tk.Toplevel(top)
         self._popup = popup
@@ -718,7 +727,7 @@ class ScrollDropdown:
         if needs_scroll:
             canvas = tk.Canvas(
                 body, bg=WHITE, highlightthickness=0, bd=0,
-                yscrollincrement=row_h,
+                yscrollincrement=row_px + row_gap,
             )
             canvas.pack(side="left", fill="both", expand=True)
             scrollbar = ctk.CTkScrollbar(
