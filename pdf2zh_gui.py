@@ -606,8 +606,9 @@ class FastScrollFrame(ctk.CTkScrollableFrame):
             pad = self._apply_widget_scaling(
                 self._parent_frame.cget("corner_radius")
                 + self._parent_frame.cget("border_width")
+                + 4
             )
-            self._scrollbar.grid_configure(padx=(0, pad))
+            self._scrollbar.grid_configure(padx=(0, pad), pady=(2, 2))
 
     def _mouse_wheel_all(self, event):
         if sys.platform.startswith("win") and self.check_if_master_is_canvas(event.widget):
@@ -670,12 +671,17 @@ class ScrollDropdown:
         self._popup = popup
         popup.overrideredirect(True)
         popup.transient(top)
-        popup.configure(bg=WHITE)
+        transparent = "#010203"
+        popup.configure(bg=transparent)
+        try:
+            popup.attributes("-transparentcolor", transparent)
+        except Exception:
+            popup.configure(bg=IVORY)
         owner_x, owner_y = x, y - self.owner.winfo_height()
         try:
             top.update_idletasks()
             self.owner.update_idletasks()
-            screen_h = top.winfo_screenheight()
+            screen_h = top.winfo_rooty() + top.winfo_height()
             screen_w = top.winfo_screenwidth()
             owner_x = self.owner.winfo_rootx()
             owner_y = self.owner.winfo_rooty()
@@ -686,7 +692,7 @@ class ScrollDropdown:
         if below_y + height <= screen_h - 8:
             popup_y = below_y
         else:
-            popup_y = max(8, above_y)
+            popup_y = below_y if len(self.values) > 6 else max(8, above_y)
         popup_x = min(max(8, owner_x), max(8, screen_w - width - 8))
         if popup_x <= 8 and owner_x > 40:
             popup_x = owner_x
@@ -1929,11 +1935,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _refresh_file_scrollbar(self):
         try:
             self.file_frame.update_idletasks()
-            first, last = self.file_frame._parent_canvas.yview()
-            if first <= 0.0 and last >= 1.0:
-                self.file_frame._scrollbar.grid_remove()
-            else:
+            canvas = self.file_frame._parent_canvas
+            content = canvas.bbox("all")
+            content_h = (content[3] - content[1]) if content else 0
+            visible_h = canvas.winfo_height()
+            if self._files and content_h > visible_h + 2:
+                self.file_frame._parent_frame.grid_columnconfigure(1, weight=0)
                 self.file_frame._scrollbar.grid()
+            else:
+                self.file_frame._scrollbar.grid_remove()
+                self.file_frame._parent_frame.grid_columnconfigure(1, weight=0, minsize=0)
         except Exception:
             pass
 
