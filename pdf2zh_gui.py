@@ -539,6 +539,19 @@ def event_has_control(event) -> bool:
     return bool(getattr(event, "state", 0) & 0x0004)
 
 
+def clamp_window_geometry(geometry: str, screen_w: int, screen_h: int) -> str | None:
+    m = re.fullmatch(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", geometry)
+    if not m:
+        return None
+    width, height = int(m.group(1)), int(m.group(2))
+    x, y = int(m.group(3)), int(m.group(4))
+    width = min(max(width, 620), max(620, screen_w - 80))
+    height = min(max(height, 430), max(430, screen_h - 120))
+    x = min(max(x, 0), max(0, screen_w - width))
+    y = min(max(y, 0), max(0, screen_h - height))
+    return f"{width}x{height}+{x}+{y}"
+
+
 def set_window_icon(window, set_default=False):
     if TITLE_ICON_PNG_PATH.exists():
         try:
@@ -1351,8 +1364,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         h = max(560, min(780, sh - 120))
         x = max(0, (sw - 840) // 2)
         saved_geometry = self._prefs.get("window_geometry")
-        if isinstance(saved_geometry, str) and re.match(r"^\d+x\d+[+-]\d+[+-]\d+$", saved_geometry):
-            self.geometry(saved_geometry)
+        clamped_geometry = (
+            clamp_window_geometry(saved_geometry, sw, sh)
+            if isinstance(saved_geometry, str) else None
+        )
+        if clamped_geometry:
+            self.geometry(clamped_geometry)
         else:
             self.geometry(f"840x{h}+{x}+24")
         self.minsize(620, 430)
