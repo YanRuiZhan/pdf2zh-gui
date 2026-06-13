@@ -602,6 +602,12 @@ class QueueLogHandler(logging.Handler):
 class FastScrollFrame(ctk.CTkScrollableFrame):
     """CTkScrollableFrame: 3x wheel speed, scrollbar inset inside the border."""
 
+    def _border_spacing(self):
+        return self._apply_widget_scaling(
+            self._parent_frame.cget("corner_radius")
+            + self._parent_frame.cget("border_width")
+        )
+
     def _create_grid(self):
         super()._create_grid()
         if self._orientation == "vertical":
@@ -613,6 +619,24 @@ class FastScrollFrame(ctk.CTkScrollableFrame):
                 + 4
             )
             self._scrollbar.grid_configure(padx=(0, pad), pady=(2, 2))
+
+    def set_scrollbar_visible(self, visible: bool):
+        if self._orientation != "vertical":
+            return
+        border_spacing = self._border_spacing()
+        if visible:
+            self._parent_canvas.grid_configure(
+                row=1, column=0, sticky="nsew",
+                padx=(border_spacing, 0), pady=border_spacing,
+            )
+            self._scrollbar.grid()
+        else:
+            self._scrollbar.grid_remove()
+            self._parent_canvas.grid_configure(
+                row=1, column=0, sticky="nsew",
+                padx=border_spacing, pady=border_spacing,
+            )
+            self._parent_frame.grid_columnconfigure(1, weight=0, minsize=0)
 
     def _mouse_wheel_all(self, event):
         if event_has_control(event):
@@ -1266,6 +1290,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._cancel = threading.Event()
         self._running = False
         self._out_dirs: set[str] = set()
+        self._file_scroll_job = None
 
         fams = set(tkfont.families(self))
 
@@ -1616,7 +1641,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             font=self.f_body, text_color=FAINT, justify="center",
         )
         self._empty_hint.pack(pady=18)
-        self.after(80, self._refresh_file_scrollbar)
+        self.file_frame.set_scrollbar_visible(False)
+        self.file_frame._parent_canvas.bind(
+            "<Configure>", lambda _e: self._schedule_file_scrollbar_refresh(), add="+"
+        )
+        self.file_frame._parent_frame.bind(
+            "<Configure>", lambda _e: self._schedule_file_scrollbar_refresh(), add="+"
+        )
+        self.after_idle(self._refresh_file_scrollbar)
 
         # settings card
         opt = self._card(parent=self._tab_pages["settings"])
@@ -1710,18 +1742,17 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._label(opt, "注意事项").grid(
             row=4, column=0, padx=(14, 4), pady=(2, 12), sticky="e"
         )
-        self.notes_entry = ctk.CTkEntry(
-            opt, height=30, fg_color=WHITE, border_color=LINE, border_width=1,
-            text_color=INK, placeholder_text_color=FAINT,
-            corner_radius=8, font=self.f_body,
-            placeholder_text="告诉 AI 翻译时的要求，多条用分号隔开；留空则用默认提示词",
+        self.notes_entry = ctk.CTkTextbox(
+            opt, height=92, wrap="word", activate_scrollbars=False,
+            fg_color=WHITE, border_color=LINE, border_width=1,
+            text_color=INK, corner_radius=8, font=self.f_body,
         )
         self.notes_entry.grid(
             row=4, column=1, columnspan=5, padx=(4, 14), pady=(2, 12), sticky="ew"
         )
         saved_notes = self._prefs.get("notes", DEFAULT_NOTES)
         if saved_notes:
-            self.notes_entry.insert(0, saved_notes)
+            self.notes_entry.insert("1.0", saved_notes)
 
         # output card
         out = self._card()
@@ -1749,7 +1780,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.out_entry.pack(side="left", padx=2, fill="x", expand=True)
         if self._prefs.get("out_dir"):
             self.out_entry.insert(0, self._prefs["out_dir"])
-        self._ghost_btn(out, "▾", self._browse_out, width=44).pack(
+        self._ghost_btn(out, "▾", self._browse_out, width=34).pack(
             side="left", padx=(8, 14)
         )
 
@@ -1780,7 +1811,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.dict_btn.configure(height=32)
         self.dict_btn.pack(side="left", padx=(8, 0))
         self.dict_box = ctk.CTkTextbox(
-            dic, height=288, state="disabled", wrap="word",
+            dic, height=230, state="disabled", wrap="word",
             fg_color=WHITE, text_color=FAINT, font=self.f_body,
             corner_radius=10, border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
@@ -1819,7 +1850,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.open_btn.pack(side="left", padx=6)
 
         self.log_box = ctk.CTkTextbox(
-            self.page, height=88, state="disabled", wrap="word",
+            self.page, height=106, state="disabled", wrap="word",
             fg_color=WHITE, text_color=SLATE, font=self.f_mono,
             corner_radius=10, border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
@@ -1844,7 +1875,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             var.trace_add("write", lambda *_: self._save_settings_prefs())
         self.pages_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
         self.notes_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
+        self.notes_entry.bind("<FocusOut>", lambda _e: self._save_settings_prefs())
         self.out_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
+
+    def _get_notes_text(self):
+        return self.notes_entry.get("1.0", "end").strip()
 
     def _save_settings_prefs(self):
         try:
@@ -1856,7 +1891,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 "pages": self.pages_entry.get().strip(),
                 "thread": self.thread_var.get(),
                 "ignore_cache": bool(self.cache_var.get()),
-                "notes": self.notes_entry.get().strip(),
+                "notes": self._get_notes_text(),
                 "out_mode": self.out_mode.get(),
                 "out_dir": self.out_entry.get().strip(),
             })
@@ -1958,7 +1993,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._files[p] = {"row": row, "status": status}
         if self._files:
             self._log(f"列表共 {len(self._files)} 个文件")
-        self.after(80, self._refresh_file_scrollbar)
+        self._schedule_file_scrollbar_refresh()
 
     def _remove_file(self, path):
         if self._running:
@@ -1968,7 +2003,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             info["row"].destroy()
         if not self._files:
             self._empty_hint.pack(pady=18)
-        self.after(80, self._refresh_file_scrollbar)
+        self._schedule_file_scrollbar_refresh()
 
     def _clear_files(self):
         if self._running:
@@ -1977,9 +2012,18 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             info["row"].destroy()
         self._files.clear()
         self._empty_hint.pack(pady=18)
-        self.after(80, self._refresh_file_scrollbar)
+        self._schedule_file_scrollbar_refresh()
+
+    def _schedule_file_scrollbar_refresh(self):
+        if self._file_scroll_job is not None:
+            try:
+                self.after_cancel(self._file_scroll_job)
+            except Exception:
+                pass
+        self._file_scroll_job = self.after(80, self._refresh_file_scrollbar)
 
     def _refresh_file_scrollbar(self):
+        self._file_scroll_job = None
         try:
             self.file_frame.update_idletasks()
             canvas = self.file_frame._parent_canvas
@@ -1987,11 +2031,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             content_h = (content[3] - content[1]) if content else 0
             visible_h = canvas.winfo_height()
             if self._files and content_h > visible_h + 2:
-                self.file_frame._parent_frame.grid_columnconfigure(1, weight=0)
-                self.file_frame._scrollbar.grid()
+                self.file_frame.set_scrollbar_visible(True)
             else:
-                self.file_frame._scrollbar.grid_remove()
-                self.file_frame._parent_frame.grid_columnconfigure(1, weight=0, minsize=0)
+                self.file_frame.set_scrollbar_visible(False)
         except Exception:
             pass
 
@@ -2027,7 +2069,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 return
         service, envs = self._selected_service()
 
-        notes = self.notes_entry.get().strip()
+        notes = self._get_notes_text()
         self._save_settings_prefs()
 
         params = {
