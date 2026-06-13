@@ -49,6 +49,7 @@ OUTPUT_MODES = {
     "仅中文": "mono",
 }
 KEYLESS_SERVICES = ("google", "bing")
+GEOMETRY_PREF_VERSION = 4
 
 DEFAULT_NOTES = "保留所有英文人名、地名不翻译"
 
@@ -552,6 +553,16 @@ def clamp_window_geometry(geometry: str, screen_w: int, screen_h: int) -> str | 
     return f"{width}x{height}+{x}+{y}"
 
 
+def is_legacy_startup_min_geometry(geometry: str, prefs: dict) -> bool:
+    if prefs.get("geometry_pref_version") == GEOMETRY_PREF_VERSION:
+        return False
+    m = re.fullmatch(r"(\d+)x(\d+)[+-]\d+[+-]\d+", geometry)
+    if not m:
+        return False
+    width, height = int(m.group(1)), int(m.group(2))
+    return (width <= 640 and height <= 520) or height <= 580
+
+
 def set_window_icon(window, set_default=False):
     if TITLE_ICON_PNG_PATH.exists():
         try:
@@ -710,6 +721,9 @@ class ScrollDropdown:
         self._popup = None
         self._scroll = None
         self._outside_bind = None
+        self._top_config_bind = None
+        self._owner_config_bind = None
+        self._popup_size = (0, 0)
 
     def configure(self, values=None):
         if values is not None:
@@ -729,6 +743,18 @@ class ScrollDropdown:
             except Exception:
                 pass
             self._outside_bind = None
+        if self._top_config_bind is not None:
+            try:
+                self.owner.winfo_toplevel().unbind("<Configure>", self._top_config_bind)
+            except Exception:
+                pass
+            self._top_config_bind = None
+        if self._owner_config_bind is not None:
+            try:
+                self.owner.unbind("<Configure>", self._owner_config_bind)
+            except Exception:
+                pass
+            self._owner_config_bind = None
 
     def toggle(self, x, y, width):
         if self._popup is not None:
@@ -742,9 +768,55 @@ class ScrollDropdown:
         except Exception:
             return max(1, int(round(value)))
 
+    def _popup_position(self, width, height):
+        top = self.owner.winfo_toplevel()
+        try:
+            top.update_idletasks()
+            self.owner.update_idletasks()
+            top_x = top.winfo_rootx()
+            top_y = top.winfo_rooty()
+            top_w = top.winfo_width()
+            top_h = top.winfo_height()
+            owner_x = self.owner.winfo_rootx() - top_x
+            owner_y = self.owner.winfo_rooty() - top_y
+        except Exception:
+            top_w, top_h = 10_000, 10_000
+            owner_x, owner_y = 0, 0
+        below_y = owner_y + self.owner.winfo_height()
+        above_y = owner_y - height
+        if below_y + height <= top_h - 8:
+            popup_y = below_y
+        else:
+            popup_y = below_y if len(self.values) > 6 else max(8, above_y)
+        popup_x = min(max(8, owner_x), max(8, top_w - width - 8))
+        if popup_x <= 8 and owner_x > 40:
+            popup_x = owner_x
+        if popup_y <= 8 and below_y > 40:
+            popup_y = below_y
+        return popup_x, popup_y
+
+    def _reposition(self, event=None):
+        if self._popup is None:
+            return
+        if (
+            event is not None
+            and event.widget is not self.owner.winfo_toplevel()
+            and event.widget is not self.owner
+        ):
+            return
+        try:
+            width, height = self._popup_size
+            if width and height:
+                popup_x, popup_y = self._popup_position(width, height)
+                self._popup.place_configure(
+                    x=popup_x, y=popup_y, width=width, height=height
+                )
+                self._popup.lift()
+        except Exception:
+            pass
+
     def open(self, x, y, width):
         self.close()
-        top = self.owner.winfo_toplevel()
         row_h = 30
         row_px = self._px(row_h)
         row_gap = 2
@@ -752,39 +824,15 @@ class ScrollDropdown:
         visible = max(1, min(self.visible_rows, len(self.values) or 1))
         height = visible * (row_px + row_gap) + chrome_px
         width = max(width, 160)
-        popup = tk.Toplevel(top)
+        top = self.owner.winfo_toplevel()
+        popup = tk.Frame(
+            top, width=width, height=height, bg=IVORY, bd=0, highlightthickness=0
+        )
         self._popup = popup
-        popup.overrideredirect(True)
-        popup.transient(top)
-        transparent = "#010203"
-        popup.configure(bg=transparent)
-        try:
-            popup.attributes("-transparentcolor", transparent)
-        except Exception:
-            popup.configure(bg=IVORY)
-        owner_x, owner_y = x, y - self.owner.winfo_height()
-        try:
-            top.update_idletasks()
-            self.owner.update_idletasks()
-            screen_h = top.winfo_rooty() + top.winfo_height()
-            screen_w = top.winfo_screenwidth()
-            owner_x = self.owner.winfo_rootx()
-            owner_y = self.owner.winfo_rooty()
-        except Exception:
-            screen_h, screen_w = 10_000, 10_000
-        below_y = owner_y + self.owner.winfo_height()
-        above_y = owner_y - height
-        if below_y + height <= screen_h - 8:
-            popup_y = below_y
-        else:
-            popup_y = below_y if len(self.values) > 6 else max(8, above_y)
-        popup_x = min(max(8, owner_x), max(8, screen_w - width - 8))
-        if popup_x <= 8 and owner_x > 40:
-            popup_x = owner_x
-        if popup_y <= 8 and below_y > 40:
-            popup_y = below_y
-        geom = f"{width}x{height}+{popup_x}+{popup_y}"
-        popup.geometry(geom)
+        self._popup_size = (width, height)
+        popup.place(x=0, y=0, width=width, height=height)
+        popup.place_forget()
+        popup.pack_propagate(False)
         needs_scroll = len(self.values) > self.visible_rows
         shell = ctk.CTkFrame(
             popup, width=width, height=height, fg_color=WHITE,
@@ -839,14 +887,10 @@ class ScrollDropdown:
         for widget in widgets:
             widget.bind("<MouseWheel>", self._on_wheel, add="+")
             widget.bind("<Escape>", lambda _e: self.close(), add="+")
-        try:
-            popup.attributes("-topmost", True)
-            popup.lift()
-            popup.after_idle(lambda g=geom: popup.geometry(g))
-            popup.after(80, lambda g=geom: popup.geometry(g))
-        except Exception:
-            pass
+        self._reposition()
         self._outside_bind = top.bind("<Button-1>", self._maybe_close_from_click, add="+")
+        self._top_config_bind = top.bind("<Configure>", self._reposition, add="+")
+        self._owner_config_bind = self.owner.bind("<Configure>", self._reposition, add="+")
 
     def _select(self, value):
         self.close()
@@ -1346,32 +1390,36 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     _model = None  # layout model, loaded once
 
     def __init__(self):
+        prefs = load_prefs()
+        saved_scale = float(prefs.get("ui_scale", 1.0) or 1.0)
+        saved_scale = min(1.6, max(0.7, round(saved_scale, 2)))
+        ctk.set_widget_scaling(saved_scale)
         super().__init__(fg_color=IVORY)
         self.TkdndVersion = TkinterDnD._require(self)
 
         self.title("PDF Translator")
         set_window_icon(self, set_default=True)
-        self._prefs = load_prefs()
-        saved_scale = float(self._prefs.get("ui_scale", 1.0) or 1.0)
-        saved_scale = min(1.6, max(0.7, round(saved_scale, 2)))
-        ctk.set_widget_scaling(saved_scale)
-        try:
-            scale = self._get_window_scaling()
-        except Exception:
-            scale = 1.0
-        sh = int(self.winfo_screenheight() / scale)
-        sw = int(self.winfo_screenwidth() / scale)
-        h = max(560, min(780, sh - 120))
-        x = max(0, (sw - 840) // 2)
+        self.withdraw()
+        self._prefs = prefs
+        sh = self.winfo_screenheight()
+        sw = self.winfo_screenwidth()
+        default_w = max(620, min(840, sw - 80))
+        default_h = max(430, min(780, sh - 120))
+        x = max(0, (sw - default_w) // 2)
         saved_geometry = self._prefs.get("window_geometry")
         clamped_geometry = (
             clamp_window_geometry(saved_geometry, sw, sh)
-            if isinstance(saved_geometry, str) else None
+            if (
+                isinstance(saved_geometry, str)
+                and not is_legacy_startup_min_geometry(saved_geometry, self._prefs)
+            ) else None
         )
         if clamped_geometry:
-            self.geometry(clamped_geometry)
+            startup_geometry = clamped_geometry
         else:
-            self.geometry(f"840x{h}+{x}+24")
+            startup_geometry = f"{default_w}x{default_h}+{x}+24"
+        self._startup_geometry = startup_geometry
+        self.geometry(startup_geometry)
         self.minsize(620, 430)
 
         self._q = queue.Queue()
@@ -1430,6 +1478,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.after(1200, self._enable_geometry_save)
         self.after(150, self._style_titlebar)
         self.after(100, self._poll)
+        self.after_idle(self._show_startup_window)
 
     # ---------- zoom (Ctrl+wheel) ----------
     def _on_ctrl_wheel(self, event):
@@ -1437,6 +1486,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._pending_scale = min(1.6, max(0.7, round(self._pending_scale + step, 2)))
         self._schedule_scale()
         return "break"
+
+    def _show_startup_window(self):
+        try:
+            self.geometry(self._startup_geometry)
+            self.update_idletasks()
+            self.deiconify()
+            self.geometry(self._startup_geometry)
+            self.after(60, lambda: self.geometry(self._startup_geometry))
+        except Exception:
+            self.deiconify()
 
     def _reset_scale(self, _e=None):
         self._pending_scale = 1.0
@@ -1520,6 +1579,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             if re.match(r"^\d+x\d+[+-]\d+[+-]\d+$", geometry):
                 self._prefs["window_geometry"] = geometry
             self._prefs["ui_scale"] = self._ui_scale
+            self._prefs["geometry_pref_version"] = GEOMETRY_PREF_VERSION
             save_prefs(self._prefs)
         except Exception:
             pass
