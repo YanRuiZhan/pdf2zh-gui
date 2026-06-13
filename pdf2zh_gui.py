@@ -1420,12 +1420,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._pending_scale = saved_scale
         self._scale_job = None
         self._geometry_job = None
+        self._geometry_save_ready = False
         self._is_scaling = False
         self.bind_all("<Control-MouseWheel>", self._on_ctrl_wheel)
         self.bind_all("<Control-Key-0>", self._reset_scale)
         self.bind("<Configure>", self._schedule_geometry_save, add="+")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        self.after(1200, self._enable_geometry_save)
         self.after(150, self._style_titlebar)
         self.after(100, self._poll)
 
@@ -1482,11 +1484,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _schedule_geometry_save(self, event=None):
         if event is not None and event.widget is not self:
             return
+        if not getattr(self, "_geometry_save_ready", False):
+            return
         if getattr(self, "_is_scaling", False):
             return
         if getattr(self, "_geometry_job", None) is not None:
             self.after_cancel(self._geometry_job)
         self._geometry_job = self.after(450, self._save_ui_prefs)
+
+    def _enable_geometry_save(self):
+        self._geometry_save_ready = True
 
     def _sync_ctk_window_size(self):
         try:
