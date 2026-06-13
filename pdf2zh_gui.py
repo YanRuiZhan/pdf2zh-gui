@@ -1259,7 +1259,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.geometry(saved_geometry)
         else:
             self.geometry(f"840x{h}+{x}+24")
-        self.minsize(620, 400)
+        self.minsize(620, 430)
 
         self._q = queue.Queue()
         self._files: dict[str, dict] = {}  # path -> {row,status}
@@ -1789,7 +1789,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._set_dict_text("查询结果会显示在这里", FAINT)
 
         # run card
-        run = self._card()
+        run = self._card(height=110)
+        run.pack_propagate(False)
         self.progress = ctk.CTkProgressBar(
             run, height=8, corner_radius=4, fg_color=BAR_BG, progress_color=CLAY
         )
@@ -1800,8 +1801,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.status_label.pack(anchor="w", padx=14, pady=(0, 4))
 
-        btns = ctk.CTkFrame(run, fg_color="transparent")
+        btns = ctk.CTkFrame(run, fg_color="transparent", height=42)
         btns.pack(fill="x", padx=10, pady=(0, 12))
+        btns.pack_propagate(False)
         self.start_btn = ctk.CTkButton(
             btns, text="开始翻译", width=150, height=38, command=self._start,
             font=self.f_btn, corner_radius=8,
