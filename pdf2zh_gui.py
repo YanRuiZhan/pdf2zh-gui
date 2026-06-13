@@ -526,6 +526,10 @@ COLOR_OK = "#6E8F5E"
 COLOR_FAIL = "#A8432F"
 
 
+def event_has_control(event) -> bool:
+    return bool(getattr(event, "state", 0) & 0x0004)
+
+
 def load_config() -> dict:
     try:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -611,6 +615,8 @@ class FastScrollFrame(ctk.CTkScrollableFrame):
             self._scrollbar.grid_configure(padx=(0, pad), pady=(2, 2))
 
     def _mouse_wheel_all(self, event):
+        if event_has_control(event):
+            return
         if sys.platform.startswith("win") and self.check_if_master_is_canvas(event.widget):
             if self._shift_pressed:
                 if self._parent_canvas.xview() != (0.0, 1.0):
@@ -770,6 +776,8 @@ class ScrollDropdown:
             self.command(value)
 
     def _on_wheel(self, event):
+        if event_has_control(event):
+            return
         if self._scroll is not None:
             try:
                 self._scroll.yview_scroll(-int(event.delta / 120), "units")
@@ -1289,6 +1297,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._pending_scale = saved_scale
         self._scale_job = None
         self._geometry_job = None
+        self._is_scaling = False
         self.bind_all("<Control-MouseWheel>", self._on_ctrl_wheel)
         self.bind_all("<Control-Key-0>", self._reset_scale)
         self.bind("<Configure>", self._schedule_geometry_save)
@@ -1311,10 +1320,6 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _schedule_scale(self):
         if self._scale_job is not None:
             self.after_cancel(self._scale_job)
-        self._q.put((
-            "log",
-            f"界面缩放 {int(self._pending_scale * 100)}%（Ctrl+0 复原）",
-        ))
         self._scale_job = self.after(220, self._apply_scale)
 
     def _apply_scale(self):
@@ -1322,7 +1327,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if self._pending_scale == self._ui_scale:
             return
         self._ui_scale = self._pending_scale
-        self._save_ui_prefs()
+        self._close_dropdowns()
+        if self._geometry_job is not None:
+            self.after_cancel(self._geometry_job)
+            self._geometry_job = None
         # Cover the window with a flat ivory curtain while the whole tree
         # re-lays out (~0.4s): one clean swap instead of piecemeal ghosting.
         # (WM_SETREDRAW freezing breaks Tk's internal buffer — don't.)
@@ -1334,18 +1342,34 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         curtain.place(relx=0, rely=0, relwidth=1, relheight=1)
         curtain.lift()
         self.update_idletasks()      # paint the curtain first
+        self._is_scaling = True
         try:
             ctk.set_widget_scaling(self._ui_scale)
             self.update_idletasks()  # settle the new layout beneath it
         finally:
+            self._is_scaling = False
             curtain.destroy()
+        self._q.put((
+            "log",
+            f"界面缩放 {int(self._ui_scale * 100)}%（Ctrl+0 复原）",
+        ))
+        self._save_ui_prefs()
 
     def _schedule_geometry_save(self, event=None):
         if event is not None and event.widget is not self:
             return
+        if getattr(self, "_is_scaling", False):
+            return
         if getattr(self, "_geometry_job", None) is not None:
             self.after_cancel(self._geometry_job)
         self._geometry_job = self.after(450, self._save_ui_prefs)
+
+    def _close_dropdowns(self, widget=None):
+        widget = widget or self
+        for child in widget.winfo_children():
+            if isinstance(child, PrettyOptionMenu):
+                child._dropdown.close()
+            self._close_dropdowns(child)
 
     def _save_ui_prefs(self):
         self._geometry_job = None
