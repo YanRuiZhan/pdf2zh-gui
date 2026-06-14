@@ -592,6 +592,7 @@ def quick_ask(stype: str, envs: dict, model: str, question: str,
 # ---- Anthropic palette ----
 IVORY = "#F0EEE6"      # window background
 PAPER = "#FAF9F5"      # cards
+CODE_BG = "#F3F4F6"    # markdown code background
 WHITE = "#FFFFFF"      # inputs / lists
 INK = "#1F1E1D"        # primary text
 SLATE = "#57564F"      # secondary text
@@ -2278,13 +2279,13 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             tb.tag_config(
                 "md_code",
                 foreground=answer_color,
-                background=IVORY,
+                background=CODE_BG,
                 font=self._qa_font(19, family=self.f_mono.cget("family")),
             )
             tb.tag_config(
                 "md_code_block",
                 foreground=answer_color,
-                background=IVORY,
+                background=CODE_BG,
                 lmargin1=8,
                 lmargin2=8,
                 spacing1=3,
@@ -2293,6 +2294,62 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             )
             tb.tag_config("md_quote", foreground=SLATE, lmargin1=12, lmargin2=12)
             tb.tag_config("md_list", lmargin1=14, lmargin2=28)
+            tb.tag_raise("sel")
+        except Exception:
+            pass
+
+    def _make_output_readonly(self, box):
+        try:
+            tb = box._textbox
+            box.configure(state="normal")
+            tb.configure(state="normal", cursor="xterm")
+            if getattr(box, "_output_readonly_bound", False):
+                return
+
+            def select_all(_event=None):
+                tb.tag_add("sel", "1.0", "end-1c")
+                tb.mark_set("insert", "1.0")
+                tb.see("insert")
+                return "break"
+
+            def copy_selection(_event=None):
+                try:
+                    text = tb.get("sel.first", "sel.last")
+                except Exception:
+                    return "break"
+                try:
+                    self.clipboard_clear()
+                    self.clipboard_append(text)
+                except Exception:
+                    pass
+                return "break"
+
+            def block_edit_key(event):
+                ctrl = bool(event.state & 0x0004)
+                keysym = (event.keysym or "").lower()
+                if ctrl and keysym == "a":
+                    return select_all(event)
+                if ctrl and keysym == "c":
+                    return copy_selection(event)
+                if keysym in {
+                    "left", "right", "up", "down", "home", "end",
+                    "prior", "next", "shift_l", "shift_r", "control_l",
+                    "control_r", "caps_lock", "tab", "escape",
+                }:
+                    return None
+                return "break"
+
+            tb.bind("<Control-a>", select_all)
+            tb.bind("<Control-A>", select_all)
+            tb.bind("<Control-c>", copy_selection)
+            tb.bind("<Control-C>", copy_selection)
+            tb.bind("<Control-Insert>", copy_selection)
+            tb.bind("<<Copy>>", copy_selection)
+            tb.bind("<KeyPress>", block_edit_key)
+            tb.bind("<<Paste>>", lambda _event: "break")
+            tb.bind("<<Cut>>", lambda _event: "break")
+            tb.bind("<Button-2>", lambda _event: "break")
+            box._output_readonly_bound = True
         except Exception:
             pass
 
@@ -2300,7 +2357,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.qa_box.configure(state="normal")
         self.qa_box.delete("0.0", "end")
         self.qa_box.insert("0.0", text)
-        self.qa_box.configure(text_color=color, state="disabled")
+        self.qa_box.configure(text_color=color, state="normal")
+        self._make_output_readonly(self.qa_box)
         if focus_latest_answer:
             answer_pos = text.rfind("\n\nA：")
             if answer_pos < 0 and text.startswith("A："):
@@ -2422,7 +2480,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._insert_markdown(answer)
             else:
                 self.qa_box.insert("end", "\n", ("qa_answer",))
-        self.qa_box.configure(state="disabled")
+        self.qa_box.configure(state="normal")
+        self._make_output_readonly(self.qa_box)
         if focus_latest_answer and visible_items:
             try:
                 self.qa_box.yview("latest_answer")
@@ -2463,17 +2522,26 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         stype, envs, model = prof
         self.qa_busy = True
         self.qa_btn.configure(state="disabled")
-        history = [
+        visible_items = [
             item for item in self.qa_history
-            if not item.get("pending")
-            and not str(item.get("answer", "")).startswith("提问失败：")
-        ][-QA_HISTORY_LIMIT:]
+            if item.get("question", "").strip()
+            and item.get("answer", "").strip()
+            and not item.get("pending")
+        ]
+        if len(visible_items) >= QA_HISTORY_LIMIT:
+            self.qa_history = []
+            history = []
+        else:
+            history = [
+                item for item in self.qa_history
+                if not item.get("pending")
+                and not str(item.get("answer", "")).startswith("提问失败：")
+            ][-QA_HISTORY_LIMIT:]
         self.qa_history.append({
             "question": question,
             "answer": "正在思考...",
             "pending": True,
         })
-        self.qa_history = self.qa_history[-QA_HISTORY_LIMIT:]
         self._render_qa_history(SLATE, focus_latest_answer=True)
         threading.Thread(
             target=self._do_qa_ask, args=(stype, envs, model, question, history),
@@ -2494,7 +2562,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.dict_box.configure(state="normal")
         self.dict_box.delete("0.0", "end")
         self.dict_box.insert("0.0", text)
-        self.dict_box.configure(text_color=color, state="disabled")
+        self.dict_box.configure(text_color=color, state="normal")
+        self._make_output_readonly(self.dict_box)
 
     def _set_dict_markdown(self, query, result, color=INK):
         self._dict_answer_color = color
@@ -2503,7 +2572,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.dict_box.delete("0.0", "end")
         self.dict_box.insert("end", f"{query}\n\n", ("qa_question",))
         self._insert_markdown(result, box=self.dict_box)
-        self.dict_box.configure(state="disabled")
+        self.dict_box.configure(state="normal")
+        self._make_output_readonly(self.dict_box)
         try:
             self.dict_box.yview("1.0")
         except Exception:
