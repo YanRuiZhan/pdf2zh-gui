@@ -2181,16 +2181,28 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._active_tab = key
 
     # ---------- quick Q&A ----------
-    def _set_qa_text(self, text, color=INK):
+    def _set_qa_text(self, text, color=INK, focus_latest_answer=False):
         self.qa_box.configure(state="normal")
         self.qa_box.delete("0.0", "end")
         self.qa_box.insert("0.0", text)
         self.qa_box.configure(text_color=color, state="disabled")
-        try:
-            self.qa_box.see("end")
-            self.qa_box.after_idle(lambda: self.qa_box.see("end"))
-        except Exception:
-            pass
+        if focus_latest_answer:
+            answer_pos = text.rfind("\n\nA：")
+            if answer_pos < 0 and text.startswith("A："):
+                answer_pos = 0
+            elif answer_pos >= 0:
+                answer_pos += 2
+            if answer_pos >= 0:
+                target = f"1.0 + {answer_pos} chars"
+                try:
+                    self.qa_box.yview(target)
+                    self.qa_box.after_idle(lambda: self.qa_box.yview(target))
+                except Exception:
+                    try:
+                        self.qa_box.see(target)
+                        self.qa_box.after_idle(lambda: self.qa_box.see(target))
+                    except Exception:
+                        pass
 
     def _format_qa_history(self):
         if not self.qa_history:
@@ -2201,7 +2213,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             answer = item.get("answer", "").strip()
             if question and answer:
                 chunks.append(f"Q：{question}\n\nA：{answer}")
-        return "\n\n---\n\n".join(chunks) if chunks else "问答结果会显示在这里"
+        return ("\n\n" + "-" * 36 + "\n\n").join(chunks) if chunks else "问答结果会显示在这里"
 
     def _qa_ask(self):
         question = self.qa_entry.get().strip()
@@ -2231,7 +2243,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             "pending": True,
         })
         self.qa_history = self.qa_history[-QA_HISTORY_LIMIT:]
-        self._set_qa_text(self._format_qa_history(), SLATE)
+        self._set_qa_text(self._format_qa_history(), SLATE, focus_latest_answer=True)
         threading.Thread(
             target=self._do_qa_ask, args=(stype, envs, model, question, history),
             daemon=True,
@@ -2569,7 +2581,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             else:
                 self.qa_history.append({"question": question, "answer": answer})
             self.qa_history = self.qa_history[-QA_HISTORY_LIMIT:]
-            self._set_qa_text(self._format_qa_history(), color)
+            self._set_qa_text(self._format_qa_history(), color, focus_latest_answer=True)
             self.qa_entry.delete(0, "end")
             self.qa_btn.configure(state="normal")
             self.qa_busy = False
@@ -2585,7 +2597,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             else:
                 self.qa_history.append({"question": question, "answer": answer})
             self.qa_history = self.qa_history[-QA_HISTORY_LIMIT:]
-            self._set_qa_text(self._format_qa_history(), color)
+            self._set_qa_text(self._format_qa_history(), color, focus_latest_answer=True)
             self.qa_btn.configure(state="normal")
             self.qa_busy = False
         elif kind == "dict_result":
