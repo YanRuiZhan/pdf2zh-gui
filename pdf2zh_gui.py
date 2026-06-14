@@ -2049,7 +2049,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.qa_btn.configure(height=32)
         self.qa_btn.pack(side="left", padx=(8, 0))
         self.qa_box = ctk.CTkTextbox(
-            qa, height=309, state="disabled", wrap="word",
+            qa, height=340, state="disabled", wrap="word",
             fg_color=WHITE, text_color=FAINT, font=self.f_body,
             corner_radius=10, border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
