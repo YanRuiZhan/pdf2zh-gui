@@ -50,6 +50,7 @@ OUTPUT_MODES = {
 }
 KEYLESS_SERVICES = ("google", "bing")
 GEOMETRY_PREF_VERSION = 4
+QA_HISTORY_LIMIT = 10
 
 DEFAULT_NOTES = "保留所有英文人名、地名不翻译"
 
@@ -533,7 +534,7 @@ def quick_ask(stype: str, envs: dict, model: str, question: str,
         "不确定时明确说明不确定，不要编造。"
     )
     turns = []
-    for item in (history or [])[-3:]:
+    for item in (history or [])[-QA_HISTORY_LIMIT:]:
         prev_q = str(item.get("question", "")).strip()
         prev_a = str(item.get("answer", "")).strip()
         if not prev_q or not prev_a:
@@ -1968,7 +1969,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             row=4, column=0, padx=(14, 4), pady=(2, 12), sticky="e"
         )
         self.notes_entry = ctk.CTkTextbox(
-            opt, height=92, wrap="word", activate_scrollbars=False,
+            opt, height=164, wrap="word", activate_scrollbars=False,
             fg_color=WHITE, border_color=LINE, border_width=1,
             text_color=INK, corner_radius=8, font=self.f_body,
         )
@@ -2010,6 +2011,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         )
 
         # quick Q&A card (short context, current session only)
+        self.qa_busy = False
         self.qa_history = []
         qa = self._card(parent=self._tab_pages["qa"])
         qa_top = ctk.CTkFrame(qa, fg_color="transparent")
@@ -2017,6 +2019,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.CTkLabel(qa_top, text="快问快答", font=self.f_section, text_color=INK).pack(
             side="left"
         )
+        ctk.CTkLabel(
+            qa_top, text="使用翻译设置中的AI翻译服务，Enter快速提问",
+            font=self.f_small, text_color=FAINT,
+        ).pack(side="right")
         qa_bar = ctk.CTkFrame(qa, fg_color="transparent")
         qa_bar.pack(fill="x", padx=14, pady=(0, 8))
         self.qa_entry = ctk.CTkEntry(
@@ -2180,6 +2186,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.qa_box.delete("0.0", "end")
         self.qa_box.insert("0.0", text)
         self.qa_box.configure(text_color=color, state="disabled")
+        try:
+            self.qa_box.see("end")
+            self.qa_box.after_idle(lambda: self.qa_box.see("end"))
+        except Exception:
+            pass
 
     def _format_qa_history(self):
         if not self.qa_history:
@@ -2197,6 +2208,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if not question:
             self._set_qa_text("请输入要提问的内容", FAINT)
             return
+        if self.qa_busy:
+            return
         prof = self._selected_ai_profile()
         if prof is None:
             self._set_qa_text(
@@ -2205,9 +2218,20 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             )
             return
         stype, envs, model = prof
+        self.qa_busy = True
         self.qa_btn.configure(state="disabled")
-        self._set_qa_text("正在思考...", SLATE)
-        history = list(self.qa_history[-3:])
+        history = [
+            item for item in self.qa_history
+            if not item.get("pending")
+            and not str(item.get("answer", "")).startswith("提问失败：")
+        ][-QA_HISTORY_LIMIT:]
+        self.qa_history.append({
+            "question": question,
+            "answer": "正在思考...",
+            "pending": True,
+        })
+        self.qa_history = self.qa_history[-QA_HISTORY_LIMIT:]
+        self._set_qa_text(self._format_qa_history(), SLATE)
         threading.Thread(
             target=self._do_qa_ask, args=(stype, envs, model, question, history),
             daemon=True,
@@ -2220,7 +2244,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 raise ValueError("接口返回为空")
             self._q.put(("qa_result", question, result, INK))
         except Exception as e:
-            self._q.put(("qa_error", f"提问失败：{e}", COLOR_FAIL))
+            self._q.put(("qa_error", question, f"提问失败：{e}", COLOR_FAIL))
 
     # ---------- quick dictionary ----------
     def _set_dict_text(self, text, color=INK):
@@ -2535,14 +2559,35 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.open_btn.configure(state="normal")
         elif kind == "qa_result":
             _, question, answer, color = ev
-            self.qa_history.append({"question": question, "answer": answer})
-            self.qa_history = self.qa_history[-3:]
+            if (
+                self.qa_history
+                and self.qa_history[-1].get("pending")
+                and self.qa_history[-1].get("question") == question
+            ):
+                self.qa_history[-1]["answer"] = answer
+                self.qa_history[-1]["pending"] = False
+            else:
+                self.qa_history.append({"question": question, "answer": answer})
+            self.qa_history = self.qa_history[-QA_HISTORY_LIMIT:]
             self._set_qa_text(self._format_qa_history(), color)
             self.qa_entry.delete(0, "end")
             self.qa_btn.configure(state="normal")
+            self.qa_busy = False
         elif kind == "qa_error":
-            self._set_qa_text(ev[1], ev[2])
+            _, question, answer, color = ev
+            if (
+                self.qa_history
+                and self.qa_history[-1].get("pending")
+                and self.qa_history[-1].get("question") == question
+            ):
+                self.qa_history[-1]["answer"] = answer
+                self.qa_history[-1]["pending"] = False
+            else:
+                self.qa_history.append({"question": question, "answer": answer})
+            self.qa_history = self.qa_history[-QA_HISTORY_LIMIT:]
+            self._set_qa_text(self._format_qa_history(), color)
             self.qa_btn.configure(state="normal")
+            self.qa_busy = False
         elif kind == "dict_result":
             self._set_dict_text(ev[1], ev[2])
             self.dict_btn.configure(state="normal")
