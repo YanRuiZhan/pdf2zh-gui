@@ -2108,7 +2108,13 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             corner_radius=10, border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
         )
-        self.qa_box.pack(fill="x", padx=14, pady=(0, 12))
+        self.qa_box.pack(fill="x", padx=14, pady=(0, 4))
+        ctk.CTkLabel(
+            qa,
+            text="选中表格内容后 Ctrl+A，再 Ctrl+C 复制完整表格",
+            font=self.f_small,
+            text_color=FAINT,
+        ).pack(anchor="e", padx=14, pady=(0, 12))
         self._qa_answer_color = INK
         self._configure_qa_markdown_tags()
         self._set_qa_text("问答结果会显示在这里", FAINT)
@@ -2935,6 +2941,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             "answer": "正在思考...",
             "pending": True,
         })
+        self.qa_entry.delete(0, "end")
         self._render_qa_history(SLATE, focus_latest_answer=True)
         threading.Thread(
             target=self._do_qa_ask, args=(stype, envs, model, question, history),
@@ -3288,7 +3295,6 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 self.qa_history.append({"question": question, "answer": answer})
             self.qa_history = self.qa_history[-QA_HISTORY_LIMIT:]
             self._render_qa_history(color, focus_latest_answer=True)
-            self.qa_entry.delete(0, "end")
             self.qa_btn.configure(state="normal")
             self.qa_busy = False
         elif kind == "qa_error":
