@@ -31,7 +31,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 TITLE_ICON_PATH = Path(__file__).with_name("star.ico")
 TITLE_ICON_PNG_PATH = Path(__file__).with_name("star.png")
 APP_ICON_PATH = Path(__file__).with_name("pdf_translate_icon_full.ico")
-TITLE_TEXT_GAP = "  "
+TITLE_TEXT_GAP = "\u00A0\u00A0"
 CONFIG_PATH = Path.home() / ".config" / "PDFMathTranslate" / "config.json"
 
 LANGS = {
@@ -2275,40 +2275,50 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         except Exception:
             return MD_RULE_CHAR * 32
 
-    def _qa_separator_width(self):
+    def _embedded_rule_width(self, box):
         try:
-            tb = self.qa_box._textbox
+            tb = box._textbox
             tb.update_idletasks()
             return max(120, tb.winfo_width() - 36)
         except Exception:
             return 320
 
-    def _sync_qa_separator_widths(self, _event=None):
-        for sep in list(getattr(self, "_qa_separator_widgets", [])):
+    def _sync_embedded_rule_widths(self, box):
+        for sep in list(getattr(box, "_md_rule_widgets", [])):
             try:
                 if sep.winfo_exists():
-                    sep.configure(width=self._qa_separator_width())
+                    sep.configure(width=self._embedded_rule_width(box))
             except Exception:
                 pass
 
-    def _insert_qa_separator(self):
-        tb = self.qa_box._textbox
-        if not getattr(self, "_qa_separator_resize_bound", False):
-            tb.bind("<Configure>", self._sync_qa_separator_widths, add="+")
-            self._qa_separator_resize_bound = True
-        gap = max(8, int(round(13 * (getattr(self, "_ui_scale", 1.0) or 1.0))))
+    def _insert_embedded_rule(self, box=None, gap=10):
+        box = box or self.qa_box
+        tb = box._textbox
+        if not getattr(box, "_md_rule_resize_bound", False):
+            tb.bind(
+                "<Configure>",
+                lambda _event, b=box: self._sync_embedded_rule_widths(b),
+                add="+",
+            )
+            box._md_rule_resize_bound = True
+        scaled_gap = max(6, int(round(gap * (getattr(self, "_ui_scale", 1.0) or 1.0))))
         sep = tk.Frame(
             tb,
-            width=self._qa_separator_width(),
+            width=self._embedded_rule_width(box),
             height=max(1, int(round(getattr(self, "_ui_scale", 1.0) or 1.0))),
             bg=LINE,
             bd=0,
             highlightthickness=0,
         )
         sep.pack_propagate(False)
-        self._qa_separator_widgets.append(sep)
-        tb.window_create("end", window=sep, pady=gap)
+        refs = getattr(box, "_md_rule_widgets", [])
+        refs.append(sep)
+        box._md_rule_widgets = refs
+        tb.window_create("end", window=sep, pady=scaled_gap)
         tb.insert("end", "\n", ("qa_answer",))
+
+    def _insert_qa_separator(self):
+        self._insert_embedded_rule(self.qa_box, gap=13)
 
     def _configure_qa_markdown_tags(self, answer_color=INK, box=None):
         try:
@@ -2412,9 +2422,21 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         except Exception:
             pass
 
+    def _clear_output_box(self, box):
+        box.configure(state="normal")
+        for attr in ("_md_table_widgets", "_md_rule_widgets"):
+            for item in list(getattr(box, attr, [])):
+                try:
+                    widget = item.get("frame") if isinstance(item, dict) else item
+                    if widget.winfo_exists():
+                        widget.destroy()
+                except Exception:
+                    pass
+            setattr(box, attr, [])
+        box.delete("0.0", "end")
+
     def _set_qa_text(self, text, color=INK, focus_latest_answer=False):
-        self.qa_box.configure(state="normal")
-        self.qa_box.delete("0.0", "end")
+        self._clear_output_box(self.qa_box)
         self.qa_box.insert("0.0", text)
         self.qa_box.configure(text_color=color, state="normal")
         self._make_output_readonly(self.qa_box)
@@ -2443,8 +2465,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if not stripped:
             box.insert("end", "\n", default_tags)
             return
-        if re.fullmatch(r"[-*_]\s*[-*_]\s*[-*_][\s\-*_]*", stripped):
-            box.insert("end", self._markdown_rule(box) + "\n", ("md_rule",))
+        if (
+            re.fullmatch(r"[-*_]\s*[-*_]\s*[-*_][\s\-*_]*", stripped)
+            or set(stripped) == {MD_RULE_CHAR}
+        ):
+            box.insert("end", "\n", default_tags)
             return
         heading = re.match(r"^(#{1,4})\s+(.+)$", stripped)
         if heading:
@@ -2504,22 +2529,190 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         text = re.sub(r"`([^`]+)`", r"\1", text)
         return text.strip()
 
-    def _display_width(self, text):
-        width = 0
+    def _table_text_weight(self, text):
+        weight = 0
         for ch in text:
             if unicodedata.combining(ch):
                 continue
-            width += 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
-        return width
+            weight += 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
+        return max(1, weight)
 
-    def _pad_display(self, text, width, align="left"):
-        pad = max(0, width - self._display_width(text))
-        if align == "right":
-            return " " * pad + text
-        if align == "center":
-            left = pad // 2
-            return " " * left + text + " " * (pad - left)
-        return text + " " * pad
+    def _table_pixel_widths(self, box, rows, col_count):
+        try:
+            tb = box._textbox
+            tb.update_idletasks()
+            available = max(260, tb.winfo_width() - 36)
+        except Exception:
+            available = 560
+        weights = []
+        for col in range(col_count):
+            weights.append(max(self._table_text_weight(row[col]) for row in rows))
+        total_weight = max(1, sum(weights))
+        min_col = 76 if col_count <= 5 else 58
+        widths = [
+            max(min_col, int(available * weight / total_weight))
+            for weight in weights
+        ]
+        total = sum(widths)
+        if total > available:
+            scale = available / total
+            widths = [max(42, int(width * scale)) for width in widths]
+        diff = int(available - sum(widths))
+        if widths and diff:
+            widths[-1] = max(42, widths[-1] + diff)
+        return widths
+
+    def _table_plain_text(self, rows):
+        return "\n".join("\t".join(row) for row in rows)
+
+    def _table_cell_height(self, text, width):
+        units = max(8, int(width / 13))
+        lines = 1
+        for part in str(text).splitlines() or [""]:
+            lines += max(0, int((self._table_text_weight(part) - 1) / units))
+        return min(5, max(1, lines))
+
+    def _copy_table_text(self, table_info, event=None):
+        widget = getattr(event, "widget", None)
+        if widget is not None and widget.winfo_class() == "Text":
+            try:
+                selected = widget.get("sel.first", "sel.last")
+            except Exception:
+                selected = ""
+            if selected:
+                try:
+                    self.clipboard_clear()
+                    self.clipboard_append(selected)
+                except Exception:
+                    pass
+                return "break"
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(table_info["plain"])
+        except Exception:
+            pass
+        return "break"
+
+    def _forward_table_wheel(self, box, event):
+        try:
+            if getattr(event, "delta", 0):
+                direction = 1 if event.delta < 0 else -1
+            elif getattr(event, "num", None) == 4:
+                direction = -1
+            elif getattr(event, "num", None) == 5:
+                direction = 1
+            else:
+                return "break"
+            first, _last = box._textbox.yview()
+            box._textbox.yview_moveto(max(0.0, min(1.0, first + direction * 0.04)))
+        except Exception:
+            pass
+        return "break"
+
+    def _bind_table_widget(self, widget, box, table_info):
+        if widget.winfo_class() == "Text":
+            def select_cell(_event=None, cell=widget):
+                cell.tag_add("sel", "1.0", "end-1c")
+                cell.mark_set("insert", "1.0")
+                cell.see("insert")
+                return "break"
+
+            def block_cell_edit(event):
+                ctrl = bool(event.state & 0x0004)
+                keysym = (event.keysym or "").lower()
+                if ctrl and keysym == "a":
+                    return select_cell(event)
+                if ctrl and keysym == "c":
+                    return self._copy_table_text(table_info, event)
+                if keysym in {
+                    "left", "right", "up", "down", "home", "end",
+                    "prior", "next", "shift_l", "shift_r", "control_l",
+                    "control_r", "caps_lock", "tab", "escape",
+                }:
+                    return None
+                return "break"
+
+            widget.bind("<Control-a>", select_cell)
+            widget.bind("<Control-A>", select_cell)
+            widget.bind("<KeyPress>", block_cell_edit)
+            widget.bind("<<Paste>>", lambda _event: "break")
+            widget.bind("<<Cut>>", lambda _event: "break")
+        widget.bind(
+            "<MouseWheel>",
+            lambda event, b=box: self._forward_table_wheel(b, event),
+        )
+        widget.bind(
+            "<Button-4>",
+            lambda event, b=box: self._forward_table_wheel(b, event),
+        )
+        widget.bind(
+            "<Button-5>",
+            lambda event, b=box: self._forward_table_wheel(b, event),
+        )
+        widget.bind(
+            "<Control-c>",
+            lambda event, info=table_info: self._copy_table_text(info, event),
+        )
+        widget.bind(
+            "<Control-C>",
+            lambda event, info=table_info: self._copy_table_text(info, event),
+        )
+        widget.bind(
+            "<Control-Insert>",
+            lambda event, info=table_info: self._copy_table_text(info, event),
+        )
+        widget.bind(
+            "<<Copy>>",
+            lambda event, info=table_info: self._copy_table_text(info, event),
+        )
+
+    def _render_table_widget(self, table_info):
+        table = table_info["frame"]
+        box = table_info["box"]
+        rows = table_info["rows"]
+        align = table_info["align"]
+        col_count = table_info["col_count"]
+        for child in table.winfo_children():
+            child.destroy()
+        widths = self._table_pixel_widths(box, rows, col_count)
+        body_font = self._qa_font(17)
+        header_font = self._qa_font(17, "bold")
+        self._bind_table_widget(table, box, table_info)
+        for row_index, row in enumerate(rows):
+            for col, value in enumerate(row):
+                bg = CODE_BG if row_index == 0 else WHITE
+                cell = tk.Text(
+                    table,
+                    width=1,
+                    height=self._table_cell_height(value, widths[col]),
+                    wrap="word",
+                    bg=bg,
+                    fg=INK,
+                    font=header_font if row_index == 0 else body_font,
+                    padx=8,
+                    pady=6,
+                    bd=0,
+                    relief="flat",
+                    highlightthickness=1,
+                    highlightbackground=LINE,
+                    highlightcolor=LINE,
+                    cursor="xterm",
+                    exportselection=True,
+                )
+                cell.insert("1.0", value)
+                cell.tag_configure("cell", justify=align[col])
+                cell.tag_add("cell", "1.0", "end")
+                cell.grid(row=row_index, column=col, sticky="nsew")
+                table.grid_columnconfigure(col, minsize=widths[col], weight=0)
+                self._bind_table_widget(cell, box, table_info)
+
+    def _sync_table_widths(self, box):
+        for table_info in list(getattr(box, "_md_table_widgets", [])):
+            try:
+                if table_info["frame"].winfo_exists():
+                    self._render_table_widget(table_info)
+            except Exception:
+                pass
 
     def _insert_markdown_table(self, lines, box=None):
         box = box or self.qa_box
@@ -2536,6 +2729,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         col_count = max(len(header), *(len(row) for row in body), 2)
         header += [""] * (col_count - len(header))
         rows = [row + [""] * (col_count - len(row)) for row in body]
+        all_rows = [header] + rows
         align = []
         for cell in sep_cells + [""] * (col_count - len(sep_cells)):
             stripped = cell.replace(" ", "")
@@ -2545,39 +2739,30 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 align.append("right")
             else:
                 align.append("left")
-        widths = []
-        for col in range(col_count):
-            widths.append(
-                max(
-                    3,
-                    self._display_width(header[col]),
-                    *(self._display_width(row[col]) for row in rows),
-                )
+        widths = self._table_pixel_widths(box, all_rows, col_count)
+        tb = box._textbox
+        table = tk.Frame(tb, bg=LINE, bd=0, highlightthickness=0)
+        table_refs = getattr(box, "_md_table_widgets", [])
+        table_info = {
+            "frame": table,
+            "box": box,
+            "rows": all_rows,
+            "align": align,
+            "col_count": col_count,
+            "plain": self._table_plain_text(all_rows),
+        }
+        table_refs.append(table_info)
+        box._md_table_widgets = table_refs
+        if not getattr(box, "_md_table_resize_bound", False):
+            tb.bind(
+                "<Configure>",
+                lambda _event, b=box: self._sync_table_widths(b),
+                add="+",
             )
-        rendered = []
-        rendered.append(
-            "| "
-            + " | ".join(
-                self._pad_display(header[col], widths[col], align[col])
-                for col in range(col_count)
-            )
-            + " |"
-        )
-        rendered.append(
-            "| "
-            + " | ".join("-" * widths[col] for col in range(col_count))
-            + " |"
-        )
-        for row in rows:
-            rendered.append(
-                "| "
-                + " | ".join(
-                    self._pad_display(row[col], widths[col], align[col])
-                    for col in range(col_count)
-                )
-                + " |"
-            )
-        box.insert("end", "\n".join(rendered) + "\n", ("qa_answer", "md_table"))
+            box._md_table_resize_bound = True
+        self._render_table_widget(table_info)
+        tb.window_create("end", window=table, padx=2, pady=6)
+        tb.insert("end", "\n", ("qa_answer",))
 
     def _insert_markdown(self, text, box=None):
         box = box or self.qa_box
@@ -2625,9 +2810,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _render_qa_history(self, color=INK, focus_latest_answer=False):
         self._qa_answer_color = color
         self._configure_qa_markdown_tags(color)
-        self.qa_box.configure(state="normal", text_color=color)
-        self.qa_box.delete("0.0", "end")
-        self._qa_separator_widgets = []
+        self._clear_output_box(self.qa_box)
+        self.qa_box.configure(text_color=color)
         visible_items = [
             item for item in self.qa_history
             if item.get("question", "").strip() and item.get("answer", "").strip()
@@ -2735,8 +2919,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     # ---------- quick dictionary ----------
     def _set_dict_text(self, text, color=INK):
-        self.dict_box.configure(state="normal")
-        self.dict_box.delete("0.0", "end")
+        self._clear_output_box(self.dict_box)
         self.dict_box.insert("0.0", text)
         self.dict_box.configure(text_color=color, state="normal")
         self._make_output_readonly(self.dict_box)
@@ -2744,8 +2927,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _set_dict_markdown(self, query, result, color=INK):
         self._dict_answer_color = color
         self._configure_qa_markdown_tags(color, box=self.dict_box)
-        self.dict_box.configure(state="normal", text_color=color)
-        self.dict_box.delete("0.0", "end")
+        self._clear_output_box(self.dict_box)
+        self.dict_box.configure(text_color=color)
         self.dict_box.insert("end", f"{query}\n\n", ("qa_question",))
         self._insert_markdown(result, box=self.dict_box)
         self.dict_box.configure(state="normal")
