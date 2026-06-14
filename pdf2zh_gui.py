@@ -51,6 +51,7 @@ OUTPUT_MODES = {
 KEYLESS_SERVICES = ("google", "bing")
 GEOMETRY_PREF_VERSION = 4
 QA_HISTORY_LIMIT = 10
+MD_RULE_CHAR = "─"
 
 DEFAULT_NOTES = "保留所有英文人名、地名不翻译"
 
@@ -1606,6 +1607,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._configure_qa_markdown_tags(
                     getattr(self, "_qa_answer_color", INK)
                 )
+            if hasattr(self, "dict_box"):
+                self._configure_qa_markdown_tags(
+                    getattr(self, "_dict_answer_color", INK),
+                    box=self.dict_box,
+                )
             self.update_idletasks()  # settle the new layout beneath it
         finally:
             self._is_scaling = False
@@ -2086,6 +2092,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
         )
         self.dict_box.pack(fill="x", padx=14, pady=(0, 12))
+        self._dict_answer_color = INK
+        self._configure_qa_markdown_tags(box=self.dict_box)
         self._set_dict_text("查询结果会显示在这里", FAINT)
 
         # run card
@@ -2196,18 +2204,31 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             weight,
         )
 
-    def _configure_qa_markdown_tags(self, answer_color=INK):
+    def _markdown_rule(self, box=None):
+        box = box or self.qa_box
         try:
-            tb = self.qa_box._textbox
-            tb.tag_config("qa_question", foreground=INK, font=self._qa_font(17, "bold"))
-            tb.tag_config("qa_answer", foreground=answer_color, font=self._qa_font(17))
-            tb.tag_config("md_h", foreground=answer_color, font=self._qa_font(19, "bold"))
-            tb.tag_config("md_bold", foreground=answer_color, font=self._qa_font(17, "bold"))
+            box.update_idletasks()
+            text_widget = box._textbox
+            width = max(text_widget.winfo_width(), box.winfo_width(), 240) - 96
+            font = tkfont.Font(font=self._qa_font(15))
+            char_width = max(1, font.measure(MD_RULE_CHAR))
+            return MD_RULE_CHAR * max(6, min(120, int(width * 0.86 / char_width)))
+        except Exception:
+            return MD_RULE_CHAR * 8
+
+    def _configure_qa_markdown_tags(self, answer_color=INK, box=None):
+        try:
+            tb = (box or self.qa_box)._textbox
+            tb.tag_config("qa_question", foreground=INK, font=self._qa_font(19, "bold"))
+            tb.tag_config("qa_answer", foreground=answer_color, font=self._qa_font(19))
+            tb.tag_config("md_rule", foreground=LINE, font=self._qa_font(15))
+            tb.tag_config("md_h", foreground=answer_color, font=self._qa_font(21, "bold"))
+            tb.tag_config("md_bold", foreground=answer_color, font=self._qa_font(19, "bold"))
             tb.tag_config(
                 "md_code",
                 foreground=answer_color,
                 background=IVORY,
-                font=self._qa_font(17, family=self.f_mono.cget("family")),
+                font=self._qa_font(19, family=self.f_mono.cget("family")),
             )
             tb.tag_config(
                 "md_code_block",
@@ -2217,7 +2238,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 lmargin2=8,
                 spacing1=3,
                 spacing3=3,
-                font=self._qa_font(17, family=self.f_mono.cget("family")),
+                font=self._qa_font(19, family=self.f_mono.cget("family")),
             )
             tb.tag_config("md_quote", foreground=SLATE, lmargin1=12, lmargin2=12)
             tb.tag_config("md_list", lmargin1=14, lmargin2=28)
@@ -2247,52 +2268,58 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     except Exception:
                         pass
 
-    def _insert_markdown_line(self, line, default_tags=("qa_answer",)):
+    def _insert_markdown_line(self, line, default_tags=("qa_answer",), box=None):
+        box = box or self.qa_box
         raw = line.rstrip()
         stripped = raw.strip()
         if not stripped:
-            self.qa_box.insert("end", "\n", default_tags)
+            box.insert("end", "\n", default_tags)
+            return
+        if re.fullmatch(r"[-*_]\s*[-*_]\s*[-*_][\s\-*_]*", stripped):
+            box.insert("end", self._markdown_rule(box) + "\n", ("md_rule",))
             return
         heading = re.match(r"^(#{1,4})\s+(.+)$", stripped)
         if heading:
-            self.qa_box.insert("end", heading.group(2).strip() + "\n", ("qa_answer", "md_h"))
+            box.insert("end", heading.group(2).strip() + "\n", ("qa_answer", "md_h"))
             return
         quote = re.match(r"^>\s?(.*)$", raw)
         if quote:
-            self.qa_box.insert("end", quote.group(1) + "\n", ("qa_answer", "md_quote"))
+            box.insert("end", quote.group(1) + "\n", ("qa_answer", "md_quote"))
             return
         item = re.match(r"^(\s*)([-*+]|\d+[.)])\s+(.+)$", raw)
         if item:
             bullet = "• " if not re.match(r"\d", item.group(2)) else f"{item.group(2)} "
-            self.qa_box.insert("end", bullet, ("qa_answer", "md_list"))
-            self._insert_markdown_inline(item.group(3), ("qa_answer", "md_list"))
-            self.qa_box.insert("end", "\n", ("qa_answer", "md_list"))
+            box.insert("end", bullet, ("qa_answer", "md_list"))
+            self._insert_markdown_inline(item.group(3), ("qa_answer", "md_list"), box=box)
+            box.insert("end", "\n", ("qa_answer", "md_list"))
             return
-        self._insert_markdown_inline(raw, default_tags)
-        self.qa_box.insert("end", "\n", default_tags)
+        self._insert_markdown_inline(raw, default_tags, box=box)
+        box.insert("end", "\n", default_tags)
 
-    def _insert_markdown_inline(self, text, default_tags=("qa_answer",)):
+    def _insert_markdown_inline(self, text, default_tags=("qa_answer",), box=None):
+        box = box or self.qa_box
         pattern = re.compile(r"(`[^`]+`|\*\*[^*]+\*\*)")
         pos = 0
         for match in pattern.finditer(text):
             if match.start() > pos:
-                self.qa_box.insert("end", text[pos:match.start()], default_tags)
+                box.insert("end", text[pos:match.start()], default_tags)
             token = match.group(0)
             if token.startswith("`"):
-                self.qa_box.insert("end", token[1:-1], default_tags + ("md_code",))
+                box.insert("end", token[1:-1], default_tags + ("md_code",))
             else:
-                self.qa_box.insert("end", token[2:-2], default_tags + ("md_bold",))
+                box.insert("end", token[2:-2], default_tags + ("md_bold",))
             pos = match.end()
         if pos < len(text):
-            self.qa_box.insert("end", text[pos:], default_tags)
+            box.insert("end", text[pos:], default_tags)
 
-    def _insert_markdown(self, text):
+    def _insert_markdown(self, text, box=None):
+        box = box or self.qa_box
         in_code = False
         code_lines = []
         for line in text.splitlines():
             if line.strip().startswith("```"):
                 if in_code:
-                    self.qa_box.insert(
+                    box.insert(
                         "end", "\n".join(code_lines).rstrip() + "\n", ("qa_answer", "md_code_block")
                     )
                     code_lines = []
@@ -2304,9 +2331,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             if in_code:
                 code_lines.append(line)
             else:
-                self._insert_markdown_line(line)
+                self._insert_markdown_line(line, box=box)
         if in_code or code_lines:
-            self.qa_box.insert(
+            box.insert(
                 "end", "\n".join(code_lines).rstrip() + "\n", ("qa_answer", "md_code_block")
             )
 
@@ -2323,14 +2350,21 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.qa_box.insert("0.0", "问答结果会显示在这里")
         for index, item in enumerate(visible_items):
             if index:
-                self.qa_box.insert("end", "\n\n", ("qa_answer",))
+                self._insert_markdown_line("---")
+                self.qa_box.insert("end", "\n", ("qa_answer",))
             number = index + 1
             self.qa_box.insert(
-                "end", f"Q{number}：{item.get('question', '').strip()}\n", ("qa_question",)
+                "end", f"Q{number}：\n", ("qa_question",)
             )
+            self.qa_box.insert("end", f"{item.get('question', '').strip()}\n", ("qa_answer",))
+            answer_index = self.qa_box.index("end-1c")
             if index == len(visible_items) - 1:
-                self.qa_box.mark_set("latest_answer", "end")
-            self.qa_box.insert("end", f"A{number}：", ("qa_answer", "md_bold"))
+                self.qa_box.mark_set("latest_answer", answer_index)
+                try:
+                    self.qa_box._textbox.mark_gravity("latest_answer", "left")
+                except Exception:
+                    pass
+            self.qa_box.insert(answer_index, f"A{number}：", ("qa_answer", "md_bold"))
             answer = item.get("answer", "").strip()
             if answer:
                 self.qa_box.insert("end", "\n", ("qa_answer",))
@@ -2358,8 +2392,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             answer = item.get("answer", "").strip()
             if question and answer:
                 number = index + 1
-                chunks.append(f"Q{number}：{question}\nA{number}：{answer}")
-        return "\n\n".join(chunks) if chunks else "问答结果会显示在这里"
+                chunks.append(f"Q{number}：\n{question}\nA{number}：\n{answer}")
+        return "\n---\n\n".join(chunks) if chunks else "问答结果会显示在这里"
 
     def _qa_ask(self):
         question = self.qa_entry.get().strip()
@@ -2411,6 +2445,19 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.dict_box.insert("0.0", text)
         self.dict_box.configure(text_color=color, state="disabled")
 
+    def _set_dict_markdown(self, query, result, color=INK):
+        self._dict_answer_color = color
+        self._configure_qa_markdown_tags(color, box=self.dict_box)
+        self.dict_box.configure(state="normal", text_color=color)
+        self.dict_box.delete("0.0", "end")
+        self.dict_box.insert("end", f"{query}\n\n", ("qa_question",))
+        self._insert_markdown(result, box=self.dict_box)
+        self.dict_box.configure(state="disabled")
+        try:
+            self.dict_box.yview("1.0")
+        except Exception:
+            pass
+
     def _dict_lookup(self):
         query = self.dict_entry.get().strip()
         if not query:
@@ -2436,7 +2483,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             result = quick_translate(stype, envs, model, query)
             if not result:
                 raise ValueError("接口返回为空")
-            self._q.put(("dict_result", f"{query}\n\n{result}", INK))
+            self._q.put(("dict_markdown", query, result, INK))
         except Exception as e:
             self._q.put(("dict_result", f"查询失败：{e}", COLOR_FAIL))
 
@@ -2748,6 +2795,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.qa_busy = False
         elif kind == "dict_result":
             self._set_dict_text(ev[1], ev[2])
+            self.dict_btn.configure(state="normal")
+        elif kind == "dict_markdown":
+            self._set_dict_markdown(ev[1], ev[2], ev[3])
             self.dict_btn.configure(state="normal")
         elif kind == "all_done":
             self._set_running(False)
