@@ -51,7 +51,6 @@ OUTPUT_MODES = {
 KEYLESS_SERVICES = ("google", "bing")
 GEOMETRY_PREF_VERSION = 4
 QA_HISTORY_LIMIT = 10
-QA_RULE_CHAR = "─"
 
 DEFAULT_NOTES = "保留所有英文人名、地名不翻译"
 
@@ -2197,30 +2196,18 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             weight,
         )
 
-    def _qa_rule(self):
-        try:
-            self.qa_box.update_idletasks()
-            text_widget = self.qa_box._textbox
-            width = max(text_widget.winfo_width(), self.qa_box.winfo_width(), 520) - 28
-            font = tkfont.Font(font=self._qa_font(13))
-            char_width = max(1, font.measure(QA_RULE_CHAR))
-            return QA_RULE_CHAR * max(48, min(160, width // char_width))
-        except Exception:
-            return QA_RULE_CHAR * 72
-
     def _configure_qa_markdown_tags(self, answer_color=INK):
         try:
             tb = self.qa_box._textbox
-            tb.tag_config("qa_question", foreground=INK, font=self._qa_font(15, "bold"))
-            tb.tag_config("qa_answer", foreground=answer_color, font=self._qa_font(15))
-            tb.tag_config("qa_rule", foreground=LINE, font=self._qa_font(13))
-            tb.tag_config("md_h", foreground=answer_color, font=self._qa_font(17, "bold"))
-            tb.tag_config("md_bold", foreground=answer_color, font=self._qa_font(15, "bold"))
+            tb.tag_config("qa_question", foreground=INK, font=self._qa_font(17, "bold"))
+            tb.tag_config("qa_answer", foreground=answer_color, font=self._qa_font(17))
+            tb.tag_config("md_h", foreground=answer_color, font=self._qa_font(19, "bold"))
+            tb.tag_config("md_bold", foreground=answer_color, font=self._qa_font(17, "bold"))
             tb.tag_config(
                 "md_code",
                 foreground=answer_color,
                 background=IVORY,
-                font=self._qa_font(15, family=self.f_mono.cget("family")),
+                font=self._qa_font(17, family=self.f_mono.cget("family")),
             )
             tb.tag_config(
                 "md_code_block",
@@ -2230,7 +2217,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 lmargin2=8,
                 spacing1=3,
                 spacing3=3,
-                font=self._qa_font(15, family=self.f_mono.cget("family")),
+                font=self._qa_font(17, family=self.f_mono.cget("family")),
             )
             tb.tag_config("md_quote", foreground=SLATE, lmargin1=12, lmargin2=12)
             tb.tag_config("md_list", lmargin1=14, lmargin2=28)
@@ -2334,14 +2321,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ]
         if not visible_items:
             self.qa_box.insert("0.0", "问答结果会显示在这里")
-        between_separator = self._qa_rule()
         for index, item in enumerate(visible_items):
             if index:
-                self.qa_box.insert("end", f"\n{between_separator}\n\n", ("qa_rule",))
-            self.qa_box.insert("end", f"Q：{item.get('question', '').strip()}\n", ("qa_question",))
+                self.qa_box.insert("end", "\n\n", ("qa_answer",))
+            number = index + 1
+            self.qa_box.insert(
+                "end", f"Q{number}：{item.get('question', '').strip()}\n", ("qa_question",)
+            )
             if index == len(visible_items) - 1:
                 self.qa_box.mark_set("latest_answer", "end")
-            self.qa_box.insert("end", "A：", ("qa_answer", "md_bold"))
+            self.qa_box.insert("end", f"A{number}：", ("qa_answer", "md_bold"))
             answer = item.get("answer", "").strip()
             if answer:
                 self.qa_box.insert("end", "\n", ("qa_answer",))
@@ -2363,14 +2352,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _format_qa_history(self):
         if not self.qa_history:
             return "问答结果会显示在这里"
-        between_separator = self._qa_rule()
         chunks = []
-        for item in self.qa_history:
+        for index, item in enumerate(self.qa_history):
             question = item.get("question", "").strip()
             answer = item.get("answer", "").strip()
             if question and answer:
-                chunks.append(f"Q：{question}\nA：{answer}")
-        return (f"\n{between_separator}\n\n").join(chunks) if chunks else "问答结果会显示在这里"
+                number = index + 1
+                chunks.append(f"Q{number}：{question}\nA{number}：{answer}")
+        return "\n\n".join(chunks) if chunks else "问答结果会显示在这里"
 
     def _qa_ask(self):
         question = self.qa_entry.get().strip()
