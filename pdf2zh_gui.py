@@ -2334,12 +2334,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ]
         if not visible_items:
             self.qa_box.insert("0.0", "问答结果会显示在这里")
-        inner_separator = self._qa_rule()
+        between_separator = self._qa_rule()
         for index, item in enumerate(visible_items):
             if index:
-                self.qa_box.insert("end", "\n\n", ("qa_answer",))
+                self.qa_box.insert("end", f"\n{between_separator}\n\n", ("qa_rule",))
             self.qa_box.insert("end", f"Q：{item.get('question', '').strip()}\n", ("qa_question",))
-            self.qa_box.insert("end", f"{inner_separator}\n", ("qa_rule",))
             if index == len(visible_items) - 1:
                 self.qa_box.mark_set("latest_answer", "end")
             self.qa_box.insert("end", "A：", ("qa_answer", "md_bold"))
@@ -2364,14 +2363,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _format_qa_history(self):
         if not self.qa_history:
             return "问答结果会显示在这里"
-        inner_separator = self._qa_rule()
+        between_separator = self._qa_rule()
         chunks = []
         for item in self.qa_history:
             question = item.get("question", "").strip()
             answer = item.get("answer", "").strip()
             if question and answer:
-                chunks.append(f"Q：{question}\n{inner_separator}\nA：{answer}")
-        return "\n\n".join(chunks) if chunks else "问答结果会显示在这里"
+                chunks.append(f"Q：{question}\nA：{answer}")
+        return (f"\n{between_separator}\n\n").join(chunks) if chunks else "问答结果会显示在这里"
 
     def _qa_ask(self):
         question = self.qa_entry.get().strip()
