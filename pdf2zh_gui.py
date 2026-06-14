@@ -732,6 +732,12 @@ class QueueLogHandler(logging.Handler):
 class FastScrollFrame(ctk.CTkScrollableFrame):
     """CTkScrollableFrame: 3x wheel speed, scrollbar inset inside the border."""
 
+    def __init__(self, *args, scrollbar_visible=False, **kwargs):
+        self._scrollbar_initially_visible = scrollbar_visible
+        super().__init__(*args, **kwargs)
+        if not scrollbar_visible:
+            self.set_scrollbar_visible(False)
+
     def _border_spacing(self):
         return self._apply_widget_scaling(
             self._parent_frame.cget("corner_radius")
@@ -749,6 +755,8 @@ class FastScrollFrame(ctk.CTkScrollableFrame):
                 + 4
             )
             self._scrollbar.grid_configure(padx=(0, pad), pady=(2, 2))
+            if not getattr(self, "_scrollbar_initially_visible", False):
+                self.set_scrollbar_visible(False)
 
     def set_scrollbar_visible(self, visible: bool):
         if self._orientation != "vertical":
@@ -780,6 +788,49 @@ class FastScrollFrame(ctk.CTkScrollableFrame):
                     self._parent_canvas.yview("scroll", -int(event.delta / 2), "units")
         else:
             super()._mouse_wheel_all(event)
+
+
+class StableScrollbarTextbox(ctk.CTkTextbox):
+    """Delay auto-scrollbar checks until initial layout has settled."""
+
+    def __init__(self, *args, scrollbar_stabilize_ms=220, **kwargs):
+        self._scrollbars_stable = False
+        super().__init__(*args, **kwargs)
+        self._hide_scrollbars_now()
+        self.after(scrollbar_stabilize_ms, self._enable_stable_scrollbars)
+
+    def _hide_scrollbars_now(self):
+        try:
+            self._hide_x_scrollbar = True
+            self._hide_y_scrollbar = True
+            self._x_scrollbar.grid_forget()
+            self._y_scrollbar.grid_forget()
+        except Exception:
+            pass
+
+    def _enable_stable_scrollbars(self):
+        self._scrollbars_stable = True
+        try:
+            super()._check_if_scrollbars_needed()
+        except Exception:
+            pass
+
+    def _check_if_scrollbars_needed(self, event=None, continue_loop=False):
+        if (
+            not getattr(self, "_scrollbars_stable", False)
+            or not self.winfo_viewable()
+        ):
+            self._hide_scrollbars_now()
+            if continue_loop and getattr(self, "_textbox", None) is not None:
+                try:
+                    self.after(
+                        self._scrollbar_update_time,
+                        lambda: self._check_if_scrollbars_needed(continue_loop=True),
+                    )
+                except Exception:
+                    pass
+            return
+        return super()._check_if_scrollbars_needed(event, continue_loop)
 
 
 class ScrollDropdown:
@@ -2048,7 +2099,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.qa_btn.configure(height=32)
         self.qa_btn.pack(side="left", padx=(8, 0))
-        self.qa_box = ctk.CTkTextbox(
+        self.qa_box = StableScrollbarTextbox(
             qa, height=340, state="disabled", wrap="word",
             fg_color=WHITE, text_color=FAINT, font=self.f_body,
             corner_radius=10, border_width=1, border_color=LINE,
@@ -2085,7 +2136,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.dict_btn.configure(height=32)
         self.dict_btn.pack(side="left", padx=(8, 0))
-        self.dict_box = ctk.CTkTextbox(
+        self.dict_box = StableScrollbarTextbox(
             dic, height=255, state="disabled", wrap="word",
             fg_color=WHITE, text_color=FAINT, font=self.f_body,
             corner_radius=10, border_width=1, border_color=LINE,
@@ -2126,7 +2177,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.open_btn.configure(state="disabled", height=38)
         self.open_btn.pack(side="left", padx=6)
 
-        self.log_box = ctk.CTkTextbox(
+        self.log_box = StableScrollbarTextbox(
             self.page, height=106, state="disabled", wrap="word",
             fg_color=WHITE, text_color=SLATE, font=self.f_mono,
             corner_radius=10, border_width=1, border_color=LINE,
