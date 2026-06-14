@@ -516,6 +516,77 @@ def quick_translate(stype: str, envs: dict, model: str, text: str,
             p.get("text", "") if isinstance(p, dict) else str(p) for p in parts
         ).strip()
 
+
+def quick_ask(stype: str, envs: dict, model: str, question: str,
+              history: list[dict], timeout: int = 35) -> str:
+    """Short literature-reading Q&A via the selected AI service."""
+    if not model:
+        raise ValueError("请先填写模型名称")
+    question = question.strip()
+    if not question:
+        raise ValueError("请输入要提问的内容")
+    base, headers = _api_target(stype, envs)
+    system_prompt = (
+        "你是文献阅读时使用的快问快答助手。回答用户临时提出的小问题，"
+        "重点是准确、简洁、直接，不要寒暄。若问题和论文、学术概念、"
+        "英文表达或技术术语有关，优先给出面向阅读理解的解释。"
+        "不确定时明确说明不确定，不要编造。"
+    )
+    turns = []
+    for item in (history or [])[-3:]:
+        prev_q = str(item.get("question", "")).strip()
+        prev_a = str(item.get("answer", "")).strip()
+        if not prev_q or not prev_a:
+            continue
+        turns.append({"role": "user", "content": prev_q[:1200]})
+        turns.append({"role": "assistant", "content": prev_a[:1600]})
+    turns.append({"role": "user", "content": question})
+
+    common = {"model": model, "max_tokens": 900, "temperature": 0.2}
+    with _http(timeout) as c:
+        if stype == "ollama":
+            messages = [{"role": "system", "content": system_prompt}] + turns
+            r = c.post(
+                f"{base}/api/chat",
+                json={
+                    "model": model,
+                    "stream": False,
+                    "messages": messages,
+                    "options": {"temperature": 0.2, "num_predict": 900},
+                },
+            )
+            if r.status_code >= 400:
+                raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
+            return (r.json().get("message", {}).get("content") or "").strip()
+        if stype == "azure-openai":
+            ver = (envs.get("AZURE_OPENAI_API_VERSION") or "2024-06-01").strip()
+            url = f"{base}/openai/deployments/{model}/chat/completions?api-version={ver}"
+            payload = {
+                **common,
+                "messages": [{"role": "system", "content": system_prompt}] + turns,
+            }
+            r = c.post(url, headers=headers, json=payload)
+        elif stype in ("anthropic", "claudeliked") or "/anthropic" in base or "anthropic.com" in base:
+            payload = {**common, "system": system_prompt, "messages": turns}
+            r = c.post(f"{base}/messages", headers=headers, json=payload)
+        else:
+            payload = {
+                **common,
+                "messages": [{"role": "system", "content": system_prompt}] + turns,
+            }
+            r = c.post(f"{base}/chat/completions", headers=headers, json=payload)
+        if r.status_code >= 400:
+            raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
+        data = r.json()
+        if "choices" in data:
+            return (data["choices"][0]["message"]["content"] or "").strip()
+        parts = data.get("content") or []
+        if isinstance(parts, str):
+            return parts.strip()
+        return "".join(
+            p.get("text", "") if isinstance(p, dict) else str(p) for p in parts
+        ).strip()
+
 # ---- Anthropic palette ----
 IVORY = "#F0EEE6"      # window background
 PAPER = "#FAF9F5"      # cards
@@ -1736,10 +1807,6 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.CTkLabel(tbox, text="PDF Translator", font=self.f_title, text_color=INK).pack(
             anchor="w"
         )
-        ctk.CTkLabel(
-            tbox, text="英文文献 → 中文 · 本地运行 · pdf2zh 驱动",
-            font=self.f_sub, text_color=FAINT,
-        ).pack(anchor="w")
         tabs = ctk.CTkFrame(
             header, fg_color=BAR_BG, corner_radius=10, border_width=1,
             border_color=LINE,
@@ -1748,11 +1815,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._tab_btns = {}
         for key, text in (
             ("translate", "PDF 翻译"),
+            ("qa", "快问快答"),
             ("dict", "单词速查"),
             ("settings", "翻译设置"),
         ):
             btn = ctk.CTkButton(
-                tabs, text=text, width=92, height=30, font=self.f_body,
+                tabs, text=text, width=82, height=30, font=self.f_body,
                 fg_color="transparent", hover_color=GHOST_H, text_color=SLATE,
                 corner_radius=8, command=lambda k=key: self._show_tab(k),
             )
@@ -1763,6 +1831,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         holder.pack(fill="both", expand=True)
         self._tab_pages = {
             "translate": ctk.CTkFrame(holder, fg_color="transparent"),
+            "qa": ctk.CTkFrame(holder, fg_color="transparent"),
             "dict": ctk.CTkFrame(holder, fg_color="transparent"),
             "settings": ctk.CTkFrame(holder, fg_color="transparent"),
         }
@@ -1940,6 +2009,38 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             side="left", padx=(8, 14)
         )
 
+        # quick Q&A card (short context, current session only)
+        self.qa_history = []
+        qa = self._card(parent=self._tab_pages["qa"])
+        qa_top = ctk.CTkFrame(qa, fg_color="transparent")
+        qa_top.pack(fill="x", padx=14, pady=(10, 4))
+        ctk.CTkLabel(qa_top, text="快问快答", font=self.f_section, text_color=INK).pack(
+            side="left"
+        )
+        qa_bar = ctk.CTkFrame(qa, fg_color="transparent")
+        qa_bar.pack(fill="x", padx=14, pady=(0, 8))
+        self.qa_entry = ctk.CTkEntry(
+            qa_bar, height=32, fg_color=WHITE, border_color=LINE, border_width=1,
+            text_color=INK, placeholder_text_color=FAINT,
+            corner_radius=8, font=self.f_body,
+            placeholder_text="输入阅读文献时遇到的问题…",
+        )
+        self.qa_entry.pack(side="left", fill="x", expand=True)
+        self.qa_entry.bind("<Return>", lambda _e: self._qa_ask())
+        self.qa_btn = self._ghost_btn(
+            qa_bar, "提问", self._qa_ask, accent=True, width=84
+        )
+        self.qa_btn.configure(height=32)
+        self.qa_btn.pack(side="left", padx=(8, 0))
+        self.qa_box = ctk.CTkTextbox(
+            qa, height=360, state="disabled", wrap="word",
+            fg_color=WHITE, text_color=FAINT, font=self.f_body,
+            corner_radius=10, border_width=1, border_color=LINE,
+            scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
+        )
+        self.qa_box.pack(fill="x", padx=14, pady=(0, 12))
+        self._set_qa_text("问答结果会显示在这里", FAINT)
+
         # quick word lookup card (reuses the selected ★ AI service)
         dic = self._card(parent=self._tab_pages["dict"])
         dic_top = ctk.CTkFrame(dic, fg_color="transparent")
@@ -2019,6 +2120,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         run.pack(fill="x", padx=PADX, pady=6)
         self.log_box.pack(fill="x", padx=PADX, pady=(2, 14))
         opt.pack(fill="x", padx=PADX, pady=12)
+        qa.pack(fill="x", padx=PADX, pady=12)
         dic.pack(fill="x", padx=PADX, pady=12)
         self._bind_setting_persistence()
         self._show_tab("translate")
@@ -2071,6 +2173,54 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 hover_color=PAPER if selected else GHOST_H,
             )
         self._active_tab = key
+
+    # ---------- quick Q&A ----------
+    def _set_qa_text(self, text, color=INK):
+        self.qa_box.configure(state="normal")
+        self.qa_box.delete("0.0", "end")
+        self.qa_box.insert("0.0", text)
+        self.qa_box.configure(text_color=color, state="disabled")
+
+    def _format_qa_history(self):
+        if not self.qa_history:
+            return "问答结果会显示在这里"
+        chunks = []
+        for item in self.qa_history:
+            question = item.get("question", "").strip()
+            answer = item.get("answer", "").strip()
+            if question and answer:
+                chunks.append(f"Q：{question}\n\nA：{answer}")
+        return "\n\n---\n\n".join(chunks) if chunks else "问答结果会显示在这里"
+
+    def _qa_ask(self):
+        question = self.qa_entry.get().strip()
+        if not question:
+            self._set_qa_text("请输入要提问的内容", FAINT)
+            return
+        prof = self._selected_ai_profile()
+        if prof is None:
+            self._set_qa_text(
+                "快问快答需要在「翻译设置」选择带 ★ 的 AI 服务"
+                "（google/bing 不支持）", COLOR_FAIL,
+            )
+            return
+        stype, envs, model = prof
+        self.qa_btn.configure(state="disabled")
+        self._set_qa_text("正在思考...", SLATE)
+        history = list(self.qa_history[-3:])
+        threading.Thread(
+            target=self._do_qa_ask, args=(stype, envs, model, question, history),
+            daemon=True,
+        ).start()
+
+    def _do_qa_ask(self, stype, envs, model, question, history):
+        try:
+            result = quick_ask(stype, envs, model, question, history)
+            if not result:
+                raise ValueError("接口返回为空")
+            self._q.put(("qa_result", question, result, INK))
+        except Exception as e:
+            self._q.put(("qa_error", f"提问失败：{e}", COLOR_FAIL))
 
     # ---------- quick dictionary ----------
     def _set_dict_text(self, text, color=INK):
@@ -2383,6 +2533,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         elif kind == "done_dir":
             self._out_dirs.add(ev[1])
             self.open_btn.configure(state="normal")
+        elif kind == "qa_result":
+            _, question, answer, color = ev
+            self.qa_history.append({"question": question, "answer": answer})
+            self.qa_history = self.qa_history[-3:]
+            self._set_qa_text(self._format_qa_history(), color)
+            self.qa_entry.delete(0, "end")
+            self.qa_btn.configure(state="normal")
+        elif kind == "qa_error":
+            self._set_qa_text(ev[1], ev[2])
+            self.qa_btn.configure(state="normal")
         elif kind == "dict_result":
             self._set_dict_text(ev[1], ev[2])
             self.dict_btn.configure(state="normal")
