@@ -2574,7 +2574,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _copy_table_text(self, table_info, event=None):
         widget = getattr(event, "widget", None)
-        if widget is not None and widget.winfo_class() == "Text":
+        if (
+            widget is not None
+            and widget.winfo_class() == "Text"
+            and not table_info.get("selected_all")
+        ):
             try:
                 selected = widget.get("sel.first", "sel.last")
             except Exception:
@@ -2589,6 +2593,29 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         try:
             self.clipboard_clear()
             self.clipboard_append(table_info["plain"])
+        except Exception:
+            pass
+        return "break"
+
+    def _clear_table_selection(self, table_info):
+        table_info["selected_all"] = False
+        for cell in table_info.get("cells", []):
+            try:
+                cell.tag_remove("table_selected", "1.0", "end")
+            except Exception:
+                pass
+
+    def _select_table(self, table_info, event=None):
+        table_info["selected_all"] = True
+        for cell in table_info.get("cells", []):
+            try:
+                cell.tag_add("table_selected", "1.0", "end")
+            except Exception:
+                pass
+        widget = getattr(event, "widget", None)
+        try:
+            if widget is not None:
+                widget.focus_set()
         except Exception:
             pass
         return "break"
@@ -2611,17 +2638,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _bind_table_widget(self, widget, box, table_info):
         if widget.winfo_class() == "Text":
-            def select_cell(_event=None, cell=widget):
-                cell.tag_add("sel", "1.0", "end-1c")
-                cell.mark_set("insert", "1.0")
-                cell.see("insert")
-                return "break"
-
             def block_cell_edit(event):
                 ctrl = bool(event.state & 0x0004)
                 keysym = (event.keysym or "").lower()
                 if ctrl and keysym == "a":
-                    return select_cell(event)
+                    return self._select_table(table_info, event)
                 if ctrl and keysym == "c":
                     return self._copy_table_text(table_info, event)
                 if keysym in {
@@ -2632,11 +2653,19 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     return None
                 return "break"
 
-            widget.bind("<Control-a>", select_cell)
-            widget.bind("<Control-A>", select_cell)
+            widget.bind("<Control-a>", lambda event, info=table_info: self._select_table(info, event))
+            widget.bind("<Control-A>", lambda event, info=table_info: self._select_table(info, event))
             widget.bind("<KeyPress>", block_cell_edit)
             widget.bind("<<Paste>>", lambda _event: "break")
             widget.bind("<<Cut>>", lambda _event: "break")
+            widget.bind(
+                "<Button-1>",
+                lambda _event, info=table_info: self._clear_table_selection(info),
+                add="+",
+            )
+        else:
+            widget.bind("<Control-a>", lambda event, info=table_info: self._select_table(info, event))
+            widget.bind("<Control-A>", lambda event, info=table_info: self._select_table(info, event))
         widget.bind(
             "<MouseWheel>",
             lambda event, b=box: self._forward_table_wheel(b, event),
@@ -2674,6 +2703,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         col_count = table_info["col_count"]
         for child in table.winfo_children():
             child.destroy()
+        table_info["cells"] = []
+        table_info["selected_all"] = False
         widths = self._table_pixel_widths(box, rows, col_count)
         body_font = self._qa_font(17)
         header_font = self._qa_font(17, "bold")
@@ -2702,8 +2733,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 cell.insert("1.0", value)
                 cell.tag_configure("cell", justify=align[col])
                 cell.tag_add("cell", "1.0", "end")
+                cell.tag_configure("table_selected", background="#DDEBFF")
                 cell.grid(row=row_index, column=col, sticky="nsew")
                 table.grid_columnconfigure(col, minsize=widths[col], weight=0)
+                table_info["cells"].append(cell)
                 self._bind_table_widget(cell, box, table_info)
 
     def _sync_table_widths(self, box):
