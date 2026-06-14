@@ -8,6 +8,7 @@ import re
 import sys
 import threading
 import traceback
+import unicodedata
 from pathlib import Path
 from string import Template
 from urllib.parse import urlsplit
@@ -30,6 +31,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 TITLE_ICON_PATH = Path(__file__).with_name("star.ico")
 TITLE_ICON_PNG_PATH = Path(__file__).with_name("star.png")
 APP_ICON_PATH = Path(__file__).with_name("pdf_translate_icon_full.ico")
+TITLE_TEXT_GAP = "  "
 CONFIG_PATH = Path.home() / ".config" / "PDFMathTranslate" / "config.json"
 
 LANGS = {
@@ -1206,7 +1208,7 @@ class ServiceDialog(ctk.CTkToplevel):
         self._geometry_job = None
         self.on_save = on_save
         self.profile = profile or {}
-        self.title("编辑服务" if profile else "添加服务")
+        self.title(f"{TITLE_TEXT_GAP}{'编辑服务' if profile else '添加服务'}")
         self._set_icon_safe()
         self.after(240, self._set_icon_safe)
         saved_geometry = getattr(master, "_prefs", {}).get("service_dialog_geometry")
@@ -1522,7 +1524,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         super().__init__(fg_color=IVORY)
         self.TkdndVersion = TkinterDnD._require(self)
 
-        self.title("PDF Translator")
+        self.title(f"{TITLE_TEXT_GAP}PDF Translator")
         set_window_icon(self, set_default=True)
         self.withdraw()
         self._prefs = prefs
@@ -2261,12 +2263,52 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         try:
             box.update_idletasks()
             text_widget = box._textbox
-            width = max(text_widget.winfo_width(), box.winfo_width(), 240) - 96
+            width = max(text_widget.winfo_width(), box.winfo_width(), 280)
             font = tkfont.Font(font=self._qa_font(15))
             char_width = max(1, font.measure(MD_RULE_CHAR))
-            return MD_RULE_CHAR * max(6, min(120, int(width * 0.86 / char_width)))
+            available = max(1, width - 34)
+            max_count = max(1, int(available / char_width))
+            count = min(180, max_count)
+            while count > 1 and font.measure(MD_RULE_CHAR * count) > available:
+                count -= 1
+            return MD_RULE_CHAR * count
         except Exception:
-            return MD_RULE_CHAR * 8
+            return MD_RULE_CHAR * 32
+
+    def _qa_separator_width(self):
+        try:
+            tb = self.qa_box._textbox
+            tb.update_idletasks()
+            return max(120, tb.winfo_width() - 36)
+        except Exception:
+            return 320
+
+    def _sync_qa_separator_widths(self, _event=None):
+        for sep in list(getattr(self, "_qa_separator_widgets", [])):
+            try:
+                if sep.winfo_exists():
+                    sep.configure(width=self._qa_separator_width())
+            except Exception:
+                pass
+
+    def _insert_qa_separator(self):
+        tb = self.qa_box._textbox
+        if not getattr(self, "_qa_separator_resize_bound", False):
+            tb.bind("<Configure>", self._sync_qa_separator_widths, add="+")
+            self._qa_separator_resize_bound = True
+        gap = max(8, int(round(13 * (getattr(self, "_ui_scale", 1.0) or 1.0))))
+        sep = tk.Frame(
+            tb,
+            width=self._qa_separator_width(),
+            height=max(1, int(round(getattr(self, "_ui_scale", 1.0) or 1.0))),
+            bg=LINE,
+            bd=0,
+            highlightthickness=0,
+        )
+        sep.pack_propagate(False)
+        self._qa_separator_widgets.append(sep)
+        tb.window_create("end", window=sep, pady=gap)
+        tb.insert("end", "\n", ("qa_answer",))
 
     def _configure_qa_markdown_tags(self, answer_color=INK, box=None):
         try:
@@ -2274,6 +2316,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             tb.tag_config("qa_question", foreground=INK, font=self._qa_font(19, "bold"))
             tb.tag_config("qa_answer", foreground=answer_color, font=self._qa_font(19))
             tb.tag_config("md_rule", foreground=LINE, font=self._qa_font(15))
+            gap = max(8, int(round(13 * (getattr(self, "_ui_scale", 1.0) or 1.0))))
+            tb.tag_config(
+                "qa_separator",
+                foreground=LINE,
+                font=self._qa_font(15),
+                spacing1=gap,
+                spacing3=gap,
+            )
             tb.tag_config("md_h", foreground=answer_color, font=self._qa_font(21, "bold"))
             tb.tag_config("md_bold", foreground=answer_color, font=self._qa_font(19, "bold"))
             tb.tag_config(
@@ -2294,6 +2344,15 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             )
             tb.tag_config("md_quote", foreground=SLATE, lmargin1=12, lmargin2=12)
             tb.tag_config("md_list", lmargin1=14, lmargin2=28)
+            tb.tag_config(
+                "md_table",
+                foreground=answer_color,
+                lmargin1=8,
+                lmargin2=8,
+                spacing1=3,
+                spacing3=3,
+                font=self._qa_font(18, family=self.f_mono.cget("family")),
+            )
             tb.tag_raise("sel")
         except Exception:
             pass
@@ -2421,11 +2480,113 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if pos < len(text):
             box.insert("end", text[pos:], default_tags)
 
+    def _md_table_cells(self, line):
+        if "|" not in line:
+            return None
+        raw = line.strip()
+        if raw.startswith("|"):
+            raw = raw[1:]
+        if raw.endswith("|"):
+            raw = raw[:-1]
+        cells = [cell.strip() for cell in raw.split("|")]
+        return cells if len(cells) >= 2 else None
+
+    def _is_md_table_separator(self, line):
+        cells = self._md_table_cells(line)
+        if not cells:
+            return False
+        return all(
+            re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells
+        )
+
+    def _plain_table_cell(self, text):
+        text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+        text = re.sub(r"`([^`]+)`", r"\1", text)
+        return text.strip()
+
+    def _display_width(self, text):
+        width = 0
+        for ch in text:
+            if unicodedata.combining(ch):
+                continue
+            width += 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
+        return width
+
+    def _pad_display(self, text, width, align="left"):
+        pad = max(0, width - self._display_width(text))
+        if align == "right":
+            return " " * pad + text
+        if align == "center":
+            left = pad // 2
+            return " " * left + text + " " * (pad - left)
+        return text + " " * pad
+
+    def _insert_markdown_table(self, lines, box=None):
+        box = box or self.qa_box
+        if len(lines) < 2:
+            for line in lines:
+                self._insert_markdown_line(line, box=box)
+            return
+        header = [self._plain_table_cell(cell) for cell in self._md_table_cells(lines[0])]
+        sep_cells = self._md_table_cells(lines[1]) or []
+        body = [
+            [self._plain_table_cell(cell) for cell in (self._md_table_cells(line) or [])]
+            for line in lines[2:]
+        ]
+        col_count = max(len(header), *(len(row) for row in body), 2)
+        header += [""] * (col_count - len(header))
+        rows = [row + [""] * (col_count - len(row)) for row in body]
+        align = []
+        for cell in sep_cells + [""] * (col_count - len(sep_cells)):
+            stripped = cell.replace(" ", "")
+            if stripped.startswith(":") and stripped.endswith(":"):
+                align.append("center")
+            elif stripped.endswith(":"):
+                align.append("right")
+            else:
+                align.append("left")
+        widths = []
+        for col in range(col_count):
+            widths.append(
+                max(
+                    3,
+                    self._display_width(header[col]),
+                    *(self._display_width(row[col]) for row in rows),
+                )
+            )
+        rendered = []
+        rendered.append(
+            "| "
+            + " | ".join(
+                self._pad_display(header[col], widths[col], align[col])
+                for col in range(col_count)
+            )
+            + " |"
+        )
+        rendered.append(
+            "| "
+            + " | ".join("-" * widths[col] for col in range(col_count))
+            + " |"
+        )
+        for row in rows:
+            rendered.append(
+                "| "
+                + " | ".join(
+                    self._pad_display(row[col], widths[col], align[col])
+                    for col in range(col_count)
+                )
+                + " |"
+            )
+        box.insert("end", "\n".join(rendered) + "\n", ("qa_answer", "md_table"))
+
     def _insert_markdown(self, text, box=None):
         box = box or self.qa_box
         in_code = False
         code_lines = []
-        for line in text.splitlines():
+        lines = text.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
             if line.strip().startswith("```"):
                 if in_code:
                     box.insert(
@@ -2436,11 +2597,26 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 else:
                     in_code = True
                     code_lines = []
+                i += 1
                 continue
             if in_code:
                 code_lines.append(line)
+                i += 1
+                continue
+            if (
+                i + 1 < len(lines)
+                and self._md_table_cells(line)
+                and self._is_md_table_separator(lines[i + 1])
+            ):
+                table_lines = [line, lines[i + 1]]
+                i += 2
+                while i < len(lines) and self._md_table_cells(lines[i]):
+                    table_lines.append(lines[i])
+                    i += 1
+                self._insert_markdown_table(table_lines, box=box)
             else:
                 self._insert_markdown_line(line, box=box)
+                i += 1
         if in_code or code_lines:
             box.insert(
                 "end", "\n".join(code_lines).rstrip() + "\n", ("qa_answer", "md_code_block")
@@ -2451,6 +2627,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._configure_qa_markdown_tags(color)
         self.qa_box.configure(state="normal", text_color=color)
         self.qa_box.delete("0.0", "end")
+        self._qa_separator_widgets = []
         visible_items = [
             item for item in self.qa_history
             if item.get("question", "").strip() and item.get("answer", "").strip()
@@ -2459,8 +2636,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.qa_box.insert("0.0", "问答结果会显示在这里")
         for index, item in enumerate(visible_items):
             if index:
-                self._insert_markdown_line("---")
-                self.qa_box.insert("end", "\n", ("qa_answer",))
+                self._insert_qa_separator()
             number = index + 1
             self.qa_box.insert(
                 "end", f"Q{number}：\n", ("qa_question",)
