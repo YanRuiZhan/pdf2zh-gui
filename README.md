@@ -17,8 +17,9 @@
 - 自动保存翻译服务、语言、输出模式、页码、线程、缓存、注意事项和输出目录等设置
 - 支持 OpenAI 兼容、Claude/Anthropic 兼容、DeepSeek、Gemini、智谱、SiliconFlow、Grok、Groq、Ollama、Azure OpenAI 等服务
 - 支持 LongCat 这类 Anthropic-compatible `/messages` 网关
+- 翻译设置内可检查 GitHub 更新，并自动拉取最新版本
 - 自动创建桌面快捷方式
-- GUI 内管理模型服务配置，API Key 只保存在本机用户配置目录
+- GUI 内管理翻译服务配置，API Key 只保存在本机用户配置目录
 
 ## 界面预览
 
@@ -86,6 +87,8 @@ pdf_translator.bat
 
 首次启动后，在 GUI 里点击“添加服务”。
 
+翻译服务下拉框只显示 GUI 内添加的自定义服务（带 `★` 前缀）。如果你以前在 pdf2zh 的 `config.json` 里配置过 `google`、`bing`、`deepseek`、`openailiked` 等旧服务，它们不会再混入 GUI 下拉列表；需要在本软件里重新添加为自定义服务。
+
 LongCat / Claude 兼容服务可选：
 
 - 类型：`Claude 兼容`
@@ -93,15 +96,16 @@ LongCat / Claude 兼容服务可选：
 - API Key：填写你自己的 Key
 - 模型名称：填写你的模型名
 
-这些配置保存在本机：
+本软件的配置保存在本机：
 
 ```text
 %USERPROFILE%\.config\PDFMathTranslate\gui_services.json
 %USERPROFILE%\.config\PDFMathTranslate\gui_prefs.json
-%USERPROFILE%\.config\PDFMathTranslate\config.json
 ```
 
-这些文件包含个人配置和密钥，不应提交到 GitHub。
+`gui_services.json` 会包含你添加的服务地址、模型名和 API Key；`gui_prefs.json` 保存界面偏好和翻译设置。它们都是个人配置，不应提交到 GitHub。
+
+如果你的电脑上还有 `%USERPROFILE%\.config\PDFMathTranslate\config.json`，那是 pdf2zh 的旧配置文件，也可能包含密钥；本 GUI 不会把其中的旧服务直接显示在「翻译服务」下拉框中。
 
 ## 默认设置
 
@@ -115,6 +119,7 @@ LongCat / Claude 兼容服务可选：
 - 并发线程：8
 - 翻译缓存：启用（不默认忽略缓存）
 - 界面缩放：90%
+- 默认不内置翻译服务，需要首次启动后手动添加
 - 默认注意事项：不翻译公式、参考文献、URL/DOI/邮箱，并保留英文人名、地名和常见专业术语缩写
 
 ## 翻译注意事项、快问快答与单词速查
