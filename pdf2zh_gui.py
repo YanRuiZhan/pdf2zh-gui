@@ -10,6 +10,7 @@ import sys
 import threading
 import traceback
 import unicodedata
+from functools import lru_cache
 from pathlib import Path
 from string import Template
 from urllib.parse import urlsplit
@@ -1607,6 +1608,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._pending_scale = saved_scale
         self._scale_job = None
         self._geometry_job = None
+        self._prefs_save_job = None
         self._geometry_save_ready = False
         self._is_scaling = False
 
@@ -1775,6 +1777,13 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             except Exception:
                 pass
             self._geometry_job = None
+        if getattr(self, "_prefs_save_job", None) is not None:
+            try:
+                self.after_cancel(self._prefs_save_job)
+            except Exception:
+                pass
+            self._prefs_save_job = None
+            self._save_settings_prefs()
         self._save_ui_prefs()
         self.destroy()
 
@@ -2090,7 +2099,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             row=4, column=0, padx=(14, 4), pady=(2, 12), sticky="e"
         )
         self.notes_entry = ctk.CTkTextbox(
-            opt, height=164, wrap="word", activate_scrollbars=False,
+            opt, height=144, wrap="word", activate_scrollbars=False,
             fg_color=WHITE, border_color=LINE, border_width=1,
             text_color=INK, corner_radius=8, font=self.f_body,
         )
@@ -2277,11 +2286,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.lang_in_var, self.lang_out_var, self.output_mode_var,
             self.thread_var, self.cache_var, self.out_mode,
         ):
-            var.trace_add("write", lambda *_: self._save_settings_prefs())
-        self.pages_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
-        self.notes_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
+            var.trace_add("write", lambda *_: self._schedule_settings_prefs_save())
+        self.pages_entry.bind("<KeyRelease>", lambda _e: self._schedule_settings_prefs_save())
+        self.notes_entry.bind("<KeyRelease>", lambda _e: self._schedule_settings_prefs_save())
         self.notes_entry.bind("<FocusOut>", lambda _e: self._save_settings_prefs())
-        self.out_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
+        self.out_entry.bind("<KeyRelease>", lambda _e: self._schedule_settings_prefs_save())
 
     def _set_update_busy(self, busy: bool):
         try:
@@ -2410,20 +2419,38 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _get_notes_text(self):
         return self.notes_entry.get("1.0", "end").strip()
 
-    def _save_settings_prefs(self):
+    def _capture_settings_prefs(self):
+        self._prefs.update({
+            "service": self.service_var.get(),
+            "lang_in": self.lang_in_var.get(),
+            "lang_out": self.lang_out_var.get(),
+            "output_mode": self.output_mode_var.get(),
+            "pages": self.pages_entry.get().strip(),
+            "thread": self.thread_var.get(),
+            "ignore_cache": bool(self.cache_var.get()),
+            "notes": self._get_notes_text(),
+            "out_mode": self.out_mode.get(),
+            "out_dir": self.out_entry.get().strip(),
+        })
+
+    def _schedule_settings_prefs_save(self):
         try:
-            self._prefs.update({
-                "service": self.service_var.get(),
-                "lang_in": self.lang_in_var.get(),
-                "lang_out": self.lang_out_var.get(),
-                "output_mode": self.output_mode_var.get(),
-                "pages": self.pages_entry.get().strip(),
-                "thread": self.thread_var.get(),
-                "ignore_cache": bool(self.cache_var.get()),
-                "notes": self._get_notes_text(),
-                "out_mode": self.out_mode.get(),
-                "out_dir": self.out_entry.get().strip(),
-            })
+            self._capture_settings_prefs()
+            if getattr(self, "_prefs_save_job", None) is not None:
+                self.after_cancel(self._prefs_save_job)
+            self._prefs_save_job = self.after(550, self._save_settings_prefs)
+        except Exception:
+            pass
+
+    def _save_settings_prefs(self):
+        if getattr(self, "_prefs_save_job", None) is not None:
+            try:
+                self.after_cancel(self._prefs_save_job)
+            except Exception:
+                pass
+        self._prefs_save_job = None
+        try:
+            self._capture_settings_prefs()
             save_prefs(self._prefs)
         except Exception:
             pass
@@ -2729,13 +2756,18 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         text = re.sub(r"`([^`]+)`", r"\1", text)
         return text.strip()
 
-    def _table_text_weight(self, text):
+    @staticmethod
+    @lru_cache(maxsize=8192)
+    def _table_text_weight_cached(text):
         weight = 0
-        for ch in text:
+        for ch in str(text):
             if unicodedata.combining(ch):
                 continue
             weight += 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
         return max(1, weight)
+
+    def _table_text_weight(self, text):
+        return self._table_text_weight_cached(str(text))
 
     def _table_pixel_widths(self, box, rows, col_count):
         try:
@@ -2910,11 +2942,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             table_info["last_tb_width"] = box._textbox.winfo_width()
         except Exception:
             table_info["last_tb_width"] = None
+        widths = self._table_pixel_widths(box, rows, col_count)
+        if table_info.get("cells") and table_info.get("last_widths") == widths:
+            return
+        table_info["last_widths"] = widths
         for child in table.winfo_children():
             child.destroy()
         table_info["cells"] = []
         table_info["selected_all"] = False
-        widths = self._table_pixel_widths(box, rows, col_count)
         body_font = self._qa_font(17)
         header_font = self._qa_font(17, "bold")
         self._bind_table_widget(table, box, table_info)
@@ -2960,7 +2995,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     if (
                         current_width is not None
                         and table_info.get("last_tb_width") is not None
-                        and abs(current_width - table_info["last_tb_width"]) < 8
+                        and abs(current_width - table_info["last_tb_width"]) < 18
                     ):
                         continue
                     self._render_table_widget(table_info)
@@ -2973,7 +3008,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             if job is not None:
                 box.after_cancel(job)
             box._md_table_resize_job = box.after(
-                120, lambda b=box: self._sync_table_widths(b)
+                180, lambda b=box: self._sync_table_widths(b)
             )
         except Exception:
             self._sync_table_widths(box)
@@ -3003,7 +3038,6 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 align.append("right")
             else:
                 align.append("left")
-        widths = self._table_pixel_widths(box, all_rows, col_count)
         tb = box._textbox
         table = tk.Frame(tb, bg=LINE, bd=0, highlightthickness=0)
         table_refs = getattr(box, "_md_table_widgets", [])
@@ -3498,12 +3532,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     # ---------- event pump ----------
     def _poll(self):
+        handled = 0
         try:
-            while True:
+            while handled < 80:
                 self._handle(self._q.get_nowait())
+                handled += 1
         except queue.Empty:
             pass
-        self.after(100, self._poll)
+        self.after(25 if handled >= 80 else 100, self._poll)
 
     def _handle(self, ev):
         kind = ev[0]
