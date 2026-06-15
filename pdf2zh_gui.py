@@ -1707,15 +1707,18 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._is_scaling = True
         try:
             ctk.set_widget_scaling(self._ui_scale)
+            self.update_idletasks()
             if hasattr(self, "qa_box"):
                 self._configure_qa_markdown_tags(
                     getattr(self, "_qa_answer_color", INK)
                 )
+                self._rerender_markdown_tables(self.qa_box)
             if hasattr(self, "dict_box"):
                 self._configure_qa_markdown_tags(
                     getattr(self, "_dict_answer_color", INK),
                     box=self.dict_box,
                 )
+                self._rerender_markdown_tables(self.dict_box)
             self.update_idletasks()  # settle the new layout beneath it
         finally:
             self._is_scaling = False
@@ -2932,7 +2935,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             lambda event, info=table_info: self._copy_table_text(info, event),
         )
 
-    def _render_table_widget(self, table_info):
+    def _render_table_widget(self, table_info, force=False):
         table = table_info["frame"]
         box = table_info["box"]
         rows = table_info["rows"]
@@ -2943,7 +2946,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         except Exception:
             table_info["last_tb_width"] = None
         widths = self._table_pixel_widths(box, rows, col_count)
-        if table_info.get("cells") and table_info.get("last_widths") == widths:
+        if not force and table_info.get("cells") and table_info.get("last_widths") == widths:
             return
         table_info["last_widths"] = widths
         for child in table.winfo_children():
@@ -2982,6 +2985,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 table.grid_columnconfigure(col, minsize=widths[col], weight=0)
                 table_info["cells"].append(cell)
                 self._bind_table_widget(cell, box, table_info)
+
+    def _rerender_markdown_tables(self, box):
+        for table_info in list(getattr(box, "_md_table_widgets", [])):
+            try:
+                if table_info["frame"].winfo_exists():
+                    self._render_table_widget(table_info, force=True)
+            except Exception:
+                pass
 
     def _sync_table_widths(self, box):
         box._md_table_resize_job = None
