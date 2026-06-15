@@ -854,6 +854,7 @@ class ScrollDropdown:
         self._top_config_bind = None
         self._owner_config_bind = None
         self._popup_size = (0, 0)
+        self._popup_desired_width = 0
 
     def configure(self, values=None):
         if values is not None:
@@ -867,6 +868,7 @@ class ScrollDropdown:
                 pass
             self._popup = None
             self._scroll = None
+            self._popup_desired_width = 0
         if self._outside_bind is not None:
             try:
                 self.owner.winfo_toplevel().unbind("<Button-1>", self._outside_bind)
@@ -898,6 +900,13 @@ class ScrollDropdown:
         except Exception:
             return max(1, int(round(value)))
 
+    def _external_popup_width(self, desired_width):
+        try:
+            screen_w = self.owner.winfo_screenwidth()
+            return min(max(160, int(desired_width)), max(160, screen_w - 16))
+        except Exception:
+            return max(160, int(desired_width))
+
     def _popup_position(self, width, height):
         top = self.owner.winfo_toplevel()
         try:
@@ -907,8 +916,15 @@ class ScrollDropdown:
                 screen_w = self.owner.winfo_screenwidth()
                 owner_x = self.owner.winfo_rootx()
                 owner_y = self.owner.winfo_rooty()
+                owner_right = min(
+                    max(owner_x + self.owner.winfo_width(), owner_x),
+                    screen_w - 8,
+                )
                 below_y = owner_y + self.owner.winfo_height()
-                popup_x = min(max(8, owner_x), max(8, screen_w - width - 8))
+                if owner_x + width <= screen_w - 8:
+                    popup_x = max(8, owner_x)
+                else:
+                    popup_x = max(8, owner_right - width)
                 return popup_x, below_y
             top_x = top.winfo_rootx()
             top_y = top.winfo_rooty()
@@ -944,6 +960,9 @@ class ScrollDropdown:
         try:
             width, height = self._popup_size
             if width and height:
+                if self.external:
+                    width = self._external_popup_width(self._popup_desired_width or width)
+                    self._popup_size = (width, height)
                 popup_x, popup_y = self._popup_position(width, height)
                 if self.external:
                     self._popup.geometry(f"{int(width)}x{int(height)}+{int(popup_x)}+{int(popup_y)}")
@@ -965,8 +984,10 @@ class ScrollDropdown:
         visible = max(1, min(self.visible_rows, len(self.values) or 1))
         height = visible * (row_px + row_gap) + chrome_px
         width = max(width, 160)
+        self._popup_desired_width = width
         top = self.owner.winfo_toplevel()
         if self.external:
+            width = self._external_popup_width(width)
             try:
                 self.owner.update_idletasks()
                 below_y = self.owner.winfo_rooty() + self.owner.winfo_height()
