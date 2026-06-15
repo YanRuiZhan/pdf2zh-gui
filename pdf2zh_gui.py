@@ -52,7 +52,7 @@ OUTPUT_MODES = {
     "仅双语": "dual",
     "仅中文": "mono",
 }
-KEYLESS_SERVICES = ("google", "bing")
+SERVICE_PLACEHOLDER = "请添加服务"
 GEOMETRY_PREF_VERSION = 4
 QA_HISTORY_LIMIT = 10
 MD_RULE_CHAR = "─"
@@ -901,11 +901,21 @@ class ScrollDropdown:
             return max(1, int(round(value)))
 
     def _external_popup_width(self, desired_width):
-        try:
-            screen_w = self.owner.winfo_screenwidth()
-            return min(max(160, int(desired_width)), max(160, screen_w - 16))
-        except Exception:
-            return max(160, int(desired_width))
+        return min(max(160, int(desired_width)), 760)
+
+    def _owner_position_in_toplevel(self):
+        top = self.owner.winfo_toplevel()
+        x = 0
+        y = 0
+        widget = self.owner
+        while widget is not top:
+            x += widget.winfo_x()
+            y += widget.winfo_y()
+            parent = widget.winfo_parent()
+            if not parent:
+                break
+            widget = widget.nametowidget(parent)
+        return x, y
 
     def _popup_position(self, width, height):
         top = self.owner.winfo_toplevel()
@@ -913,25 +923,18 @@ class ScrollDropdown:
             top.update_idletasks()
             self.owner.update_idletasks()
             if self.external:
-                screen_w = self.owner.winfo_screenwidth()
                 owner_x = self.owner.winfo_rootx()
                 owner_y = self.owner.winfo_rooty()
-                owner_right = min(
-                    max(owner_x + self.owner.winfo_width(), owner_x),
-                    screen_w - 8,
-                )
+                owner_right = max(owner_x + self.owner.winfo_width(), owner_x)
                 below_y = owner_y + self.owner.winfo_height()
-                if owner_x + width <= screen_w - 8:
+                if width <= self.owner.winfo_width():
                     popup_x = max(8, owner_x)
                 else:
                     popup_x = max(8, owner_right - width)
                 return popup_x, below_y
-            top_x = top.winfo_rootx()
-            top_y = top.winfo_rooty()
             top_w = top.winfo_width()
             top_h = top.winfo_height()
-            owner_x = self.owner.winfo_rootx() - top_x
-            owner_y = self.owner.winfo_rooty() - top_y
+            owner_x, owner_y = self._owner_position_in_toplevel()
         except Exception:
             top_w, top_h = 10_000, 10_000
             owner_x, owner_y = 0, 0
@@ -941,9 +944,14 @@ class ScrollDropdown:
             popup_y = below_y
         else:
             popup_y = below_y if len(self.values) > 6 else max(8, above_y)
-        popup_x = min(max(8, owner_x), max(8, top_w - width - 8))
-        if popup_x <= 8 and owner_x > 40:
+        owner_width = self.owner.winfo_width()
+        owner_right = owner_x + owner_width
+        if width <= owner_width:
             popup_x = owner_x
+        else:
+            popup_x = max(8, owner_right - width)
+        if popup_x + width > top_w - 8 and width > owner_width:
+            popup_x = max(8, min(popup_x, top_w - width - 8))
         if popup_y <= 8 and below_y > 40:
             popup_y = below_y
         return popup_x, popup_y
@@ -1666,10 +1674,6 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.f_sub = ctk.CTkFont(family=serif, size=12)
         self.f_mono = ctk.CTkFont(family=mono, size=11)
 
-        cfg = load_config()
-        self._cfg_services = [
-            t.get("name") for t in cfg.get("translators", []) if t.get("name")
-        ]
         self._profiles = load_profiles()
         logging.basicConfig(level=logging.INFO)
         logging.getLogger("pdf2zh").addHandler(QueueLogHandler(self._q))
@@ -1840,11 +1844,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     # ---------- service profiles ----------
     def _service_options(self) -> list[str]:
-        """Dropdown values: custom profiles, config translators, keyless."""
-        names = [f"★ {p['display']}" for p in self._profiles]
-        names += [s for s in self._cfg_services if s not in KEYLESS_SERVICES]
-        names += list(KEYLESS_SERVICES)
-        return list(dict.fromkeys(names)) or ["google"]
+        """Dropdown values: GUI-managed service profiles only."""
+        custom = [f"★ {p['display']}" for p in self._profiles]
+        if custom:
+            return list(dict.fromkeys(custom))
+        return [SERVICE_PLACEHOLDER]
 
     def _select_default_service(self):
         opts = self._service_options()
@@ -2052,14 +2056,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._label(opt, "翻译服务").grid(row=1, column=0, padx=(14, 4), pady=8, sticky="e")
         svc_box = ctk.CTkFrame(opt, fg_color="transparent")
         svc_box.grid(row=1, column=1, columnspan=5, padx=4, pady=8, sticky="w")
-        self.service_var = ctk.StringVar(value="google")
+        self.service_var = ctk.StringVar(
+            value=services[0] if services else SERVICE_PLACEHOLDER
+        )
         self.service_menu = PrettyOptionMenu(
             svc_box, self.service_var, services, 240, font=self.f_body,
             command=self._on_service_selected,
         )
         self.service_menu.pack(side="left")
         ctk.CTkButton(
-            svc_box, text="＋ 添加模型", width=92, height=30, font=self.f_body,
+            svc_box, text="＋ 添加服务", width=92, height=30, font=self.f_body,
             fg_color="transparent", border_width=1, border_color=CLAY,
             text_color=CLAY, hover_color=TINT, corner_radius=8,
             command=self._manage_services,
@@ -3234,8 +3240,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         prof = self._selected_ai_profile()
         if prof is None:
             self._set_qa_text(
-                "快问快答需要在「翻译设置」选择带 ★ 的 AI 服务"
-                "（google/bing 不支持）", COLOR_FAIL,
+                "快问快答需要在「翻译设置」添加并选择自定义 AI 服务", COLOR_FAIL,
             )
             return
         stype, envs, model = prof
@@ -3306,8 +3311,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         prof = self._selected_ai_profile()
         if prof is None:
             self._set_dict_text(
-                "单词速查需要 AI 服务：请在「翻译服务」选择带 ★ 的自定义服务"
-                "（google/bing 不支持）", COLOR_FAIL,
+                "单词速查需要 AI 服务：请在「翻译设置」添加并选择自定义服务",
+                COLOR_FAIL,
             )
             return
         stype, envs, model = prof
@@ -3443,6 +3448,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._log("请填写输出目录，或选择「原 PDF 所在目录」")
                 return
         service, envs = self._selected_service()
+        if not service or service == SERVICE_PLACEHOLDER:
+            self._log("请先在「翻译设置」添加服务")
+            return
 
         notes = self._get_notes_text()
         self._save_settings_prefs()
