@@ -5,6 +5,7 @@ import logging
 import os
 import queue
 import re
+import subprocess
 import sys
 import threading
 import traceback
@@ -25,7 +26,7 @@ if sys.stderr is None:
 import tkinter.font as tkfont
 import tkinter as tk
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 TITLE_ICON_PATH = Path(__file__).with_name("star.ico")
@@ -839,12 +840,13 @@ class StableScrollbarTextbox(ctk.CTkTextbox):
 class ScrollDropdown:
     """Small scrollable popup used by PrettyOptionMenu for long model lists."""
 
-    def __init__(self, owner, values, command, font=None, visible_rows=6):
+    def __init__(self, owner, values, command, font=None, visible_rows=6, external=False):
         self.owner = owner
         self.values = list(values)
         self.command = command
         self.font = font
         self.visible_rows = visible_rows
+        self.external = external
         self._popup = None
         self._scroll = None
         self._outside_bind = None
@@ -900,6 +902,13 @@ class ScrollDropdown:
         try:
             top.update_idletasks()
             self.owner.update_idletasks()
+            if self.external:
+                screen_w = self.owner.winfo_screenwidth()
+                owner_x = self.owner.winfo_rootx()
+                owner_y = self.owner.winfo_rooty()
+                below_y = owner_y + self.owner.winfo_height()
+                popup_x = min(max(8, owner_x), max(8, screen_w - width - 8))
+                return popup_x, below_y
             top_x = top.winfo_rootx()
             top_y = top.winfo_rooty()
             top_w = top.winfo_width()
@@ -935,9 +944,13 @@ class ScrollDropdown:
             width, height = self._popup_size
             if width and height:
                 popup_x, popup_y = self._popup_position(width, height)
-                self._popup.place_configure(
-                    x=popup_x, y=popup_y, width=width, height=height
-                )
+                if self.external:
+                    self._popup.geometry(f"{int(width)}x{int(height)}+{int(popup_x)}+{int(popup_y)}")
+                    self._popup.deiconify()
+                else:
+                    self._popup.place_configure(
+                        x=popup_x, y=popup_y, width=width, height=height
+                    )
                 self._popup.lift()
         except Exception:
             pass
@@ -952,13 +965,34 @@ class ScrollDropdown:
         height = visible * (row_px + row_gap) + chrome_px
         width = max(width, 160)
         top = self.owner.winfo_toplevel()
-        popup = tk.Frame(
-            top, width=width, height=height, bg=IVORY, bd=0, highlightthickness=0
-        )
+        if self.external:
+            try:
+                self.owner.update_idletasks()
+                below_y = self.owner.winfo_rooty() + self.owner.winfo_height()
+                available = self.owner.winfo_screenheight() - below_y - 8
+                min_height = row_px + chrome_px
+                if available > min_height:
+                    height = min(height, available)
+            except Exception:
+                pass
+        if self.external:
+            popup = tk.Toplevel(top)
+            popup.withdraw()
+            popup.overrideredirect(True)
+            popup.configure(bg=IVORY, bd=0, highlightthickness=0)
+            try:
+                popup.transient(top)
+            except Exception:
+                pass
+        else:
+            popup = tk.Frame(
+                top, width=width, height=height, bg=IVORY, bd=0, highlightthickness=0
+            )
         self._popup = popup
         self._popup_size = (width, height)
-        popup.place(x=0, y=0, width=width, height=height)
-        popup.place_forget()
+        if not self.external:
+            popup.place(x=0, y=0, width=width, height=height)
+            popup.place_forget()
         popup.pack_propagate(False)
         needs_scroll = len(self.values) > self.visible_rows
         shell = ctk.CTkFrame(
@@ -1061,7 +1095,7 @@ class PrettyOptionMenu(ctk.CTkFrame):
 
     def __init__(
         self, master, variable, values, width, height=30, font=None,
-        command=None, state="normal",
+        command=None, state="normal", external_popup=False,
     ):
         super().__init__(
             master, width=width, height=height, fg_color=WHITE,
@@ -1083,6 +1117,7 @@ class PrettyOptionMenu(ctk.CTkFrame):
 
         self._dropdown = ScrollDropdown(
             owner=self, values=self._values, command=self._select, font=font,
+            external=external_popup,
         )
         # chevron packs first (side=right) so it stays visible at any width;
         # CTkLabel (unlike CTkButton) has no 140px default that breaks narrow menus
@@ -1181,9 +1216,21 @@ class PrettyOptionMenu(ctk.CTkFrame):
     def _on_click(self, _e=None):
         if self._state == "disabled":
             return
+        width = self.winfo_width()
+        try:
+            if self._values:
+                font = tkfont.Font(font=self._font or self._text.cget("font"))
+                longest = max(font.measure(str(v)) for v in self._values)
+                if self._dropdown.external:
+                    max_width = max(160, self.winfo_screenwidth() - 48)
+                else:
+                    max_width = max(160, self.winfo_screenwidth() - self.winfo_rootx() - 24)
+                width = min(max(width, longest + 52), max_width)
+        except Exception:
+            pass
         self._dropdown.toggle(
             self.winfo_rootx(), self.winfo_rooty() + self.winfo_height(),
-            self.winfo_width(),
+            width,
         )
 
     def _select(self, value):
@@ -1458,8 +1505,9 @@ class ServiceDialog(ctk.CTkToplevel):
             elif env_key.endswith("_MODEL"):
                 menu = PrettyOptionMenu(
                     row, variable=ctk.StringVar(value="选择模型"),
-                    values=["选择模型"], width=104, height=30,
+                    values=["选择模型"], width=168, height=30,
                     font=self.master_ref.f_small,
+                    external_popup=True,
                     command=lambda value, e=entry: self._set_model_entry(e, value),
                 )
                 menu.set("选择模型")
@@ -1944,7 +1992,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         opt = self._card(parent=self._tab_pages["settings"])
         opt.grid_columnconfigure((1, 3, 5), weight=1)
         ctk.CTkLabel(opt, text="翻译设置", font=self.f_section, text_color=INK).grid(
-            row=0, column=0, columnspan=6, padx=14, pady=(10, 0), sticky="w"
+            row=0, column=0, columnspan=5, padx=14, pady=(10, 0), sticky="w"
+        )
+        self.update_btn = ctk.CTkButton(
+            opt, text="检查更新", width=88, height=28, font=self.f_small,
+            fg_color="transparent", border_width=1, border_color=LINE,
+            text_color=SLATE, hover_color=GHOST_H, corner_radius=8,
+            command=self._check_updates,
+        )
+        self.update_btn.grid(
+            row=0, column=5, padx=(4, 14), pady=(10, 0), sticky="e"
         )
 
         self._label(opt, "翻译服务").grid(row=1, column=0, padx=(14, 4), pady=8, sticky="e")
@@ -2225,6 +2282,130 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.notes_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
         self.notes_entry.bind("<FocusOut>", lambda _e: self._save_settings_prefs())
         self.out_entry.bind("<KeyRelease>", lambda _e: self._save_settings_prefs())
+
+    def _set_update_busy(self, busy: bool):
+        try:
+            self.update_btn.configure(
+                state="disabled" if busy else "normal",
+                text="检查中..." if busy else "检查更新",
+            )
+        except Exception:
+            pass
+
+    def _run_git(self, args, timeout=35):
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(Path(__file__).resolve().parent),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=creationflags,
+        )
+
+    def _check_updates(self):
+        self._set_update_busy(True)
+        self._log("正在检查 GitHub 更新...")
+        threading.Thread(target=self._do_check_updates, daemon=True).start()
+
+    def _do_check_updates(self):
+        try:
+            inside = self._run_git(["rev-parse", "--is-inside-work-tree"], timeout=10)
+            if inside.returncode != 0 or inside.stdout.strip().lower() != "true":
+                self.after(0, lambda: self._finish_update_check(
+                    "当前目录不是 Git 仓库，无法自动更新。", warning=True
+                ))
+                return
+            branch = self._run_git(["branch", "--show-current"], timeout=10)
+            current_branch = (branch.stdout or "").strip() or "main"
+            fetch = self._run_git(["fetch", "--quiet", "origin", current_branch], timeout=60)
+            if fetch.returncode != 0:
+                msg = (fetch.stderr or fetch.stdout or "git fetch 失败").strip()
+                self.after(0, lambda m=msg: self._finish_update_check(
+                    f"检查更新失败：{m}", error=True
+                ))
+                return
+            local = self._run_git(["rev-parse", "HEAD"], timeout=10)
+            remote = self._run_git(["rev-parse", f"origin/{current_branch}"], timeout=10)
+            local_rev = (local.stdout or "").strip()
+            remote_rev = (remote.stdout or "").strip()
+            if not local_rev or not remote_rev:
+                self.after(0, lambda: self._finish_update_check(
+                    "无法读取本地或远端版本。", error=True
+                ))
+                return
+            if local_rev == remote_rev:
+                self.after(0, lambda: self._finish_update_check("当前已经是最新版本。"))
+                return
+            ancestor = self._run_git(
+                ["merge-base", "--is-ancestor", "HEAD", f"origin/{current_branch}"],
+                timeout=10,
+            )
+            if ancestor.returncode != 0:
+                self.after(0, lambda: self._finish_update_check(
+                    "远端版本与本地历史不完全一致，已取消自动更新。", warning=True
+                ))
+                return
+            changes = self._run_git(
+                ["log", "--oneline", "--max-count=6", f"HEAD..origin/{current_branch}"],
+                timeout=10,
+            )
+            summary = (changes.stdout or "").strip()
+            self.after(0, lambda s=summary, b=current_branch: self._prompt_update(s, b))
+        except Exception as e:
+            self.after(0, lambda err=e: self._finish_update_check(
+                f"检查更新失败：{err}", error=True
+            ))
+
+    def _finish_update_check(self, message, warning=False, error=False):
+        self._set_update_busy(False)
+        self._log(message)
+        if error:
+            messagebox.showerror("检查更新", message, parent=self)
+        elif warning:
+            messagebox.showwarning("检查更新", message, parent=self)
+        else:
+            messagebox.showinfo("检查更新", message, parent=self)
+
+    def _prompt_update(self, summary, branch):
+        self._set_update_busy(False)
+        detail = f"\n\n更新内容：\n{summary}" if summary else ""
+        ok = messagebox.askyesno(
+            "发现新版本",
+            f"GitHub 上有新版本，是否立即更新？{detail}\n\n更新完成后重启 PDF Translator 生效。",
+            parent=self,
+        )
+        if not ok:
+            self._log("已取消更新。")
+            return
+        self._set_update_busy(True)
+        self._log("正在从 GitHub 拉取最新版本...")
+        threading.Thread(target=self._do_apply_update, args=(branch,), daemon=True).start()
+
+    def _do_apply_update(self, branch):
+        try:
+            dirty = self._run_git(["status", "--porcelain"], timeout=10)
+            if dirty.returncode == 0 and (dirty.stdout or "").strip():
+                self.after(0, lambda: self._finish_update_check(
+                    "检测到本地有未提交改动，已取消自动更新。", warning=True
+                ))
+                return
+            pull = self._run_git(["pull", "--ff-only", "origin", branch], timeout=90)
+            if pull.returncode != 0:
+                msg = (pull.stderr or pull.stdout or "git pull 失败").strip()
+                self.after(0, lambda m=msg: self._finish_update_check(
+                    f"更新失败：{m}", error=True
+                ))
+                return
+            self.after(0, lambda: self._finish_update_check(
+                "更新完成。请重启 PDF Translator 以使用最新版本。"
+            ))
+        except Exception as e:
+            self.after(0, lambda err=e: self._finish_update_check(
+                f"更新失败：{err}", error=True
+            ))
 
     def _get_notes_text(self):
         return self.notes_entry.get("1.0", "end").strip()
@@ -3412,12 +3593,22 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             box.configure(state="normal")
             if repeated:
                 try:
-                    box.delete("end-2l linestart", "end-1l lineend")
-                    box.insert("end-1l linestart", line)
+                    start = getattr(box, "_last_log_start")
+                    end = getattr(box, "_last_log_end")
+                    box.delete(start, end)
+                    box.insert(start, line + "\n")
+                    box._last_log_start = start
+                    box._last_log_end = box.index(f"{start} lineend +1c")
                 except Exception:
+                    start = box.index("end-1c")
                     box.insert("end", line + "\n")
+                    box._last_log_start = start
+                    box._last_log_end = box.index(f"{start} lineend +1c")
             else:
+                start = box.index("end-1c")
                 box.insert("end", line + "\n")
+                box._last_log_start = start
+                box._last_log_end = box.index(f"{start} lineend +1c")
             box.see("end")
             box.configure(state="disabled")
 
@@ -3431,6 +3622,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 "0.0",
                 "暂无输出\n开始翻译后，这里会显示运行状态、输出文件和错误信息\nCtrl+滚轮以缩放界面",
             )
+            for attr in ("_last_log_start", "_last_log_end"):
+                if hasattr(box, attr):
+                    delattr(box, attr)
             box.configure(state="disabled")
 
 
