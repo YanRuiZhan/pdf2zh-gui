@@ -2114,7 +2114,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             text="选中表格内容后 Ctrl+A，再 Ctrl+C 复制完整表格",
             font=self.f_small,
             text_color=FAINT,
-        ).pack(anchor="e", padx=14, pady=(0, 12))
+        ).pack(anchor="w", padx=14, pady=(0, 12))
         self._qa_answer_color = INK
         self._configure_qa_markdown_tags()
         self._set_qa_text("问答结果会显示在这里", FAINT)
@@ -2192,7 +2192,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             corner_radius=10, border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
         )
+        self.settings_log_box = StableScrollbarTextbox(
+            self._tab_pages["settings"], height=106, state="disabled", wrap="word",
+            fg_color=WHITE, text_color=SLATE, font=self.f_mono,
+            corner_radius=10, border_width=1, border_color=LINE,
+            scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
+        )
+        self._log_boxes = [self.log_box, self.settings_log_box]
         self._log_is_empty = True
+        self._last_log_msg = None
+        self._last_log_count = 0
         self._set_log_hint()
         # natural top-down flow inside the scrollable page
         card.pack(fill="x", padx=PADX, pady=6)
@@ -2200,6 +2209,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         run.pack(fill="x", padx=PADX, pady=6)
         self.log_box.pack(fill="x", padx=PADX, pady=(2, 14))
         opt.pack(fill="x", padx=PADX, pady=12)
+        self.settings_log_box.pack(fill="x", padx=PADX, pady=(0, 14))
         qa.pack(fill="x", padx=PADX, pady=12)
         dic.pack(fill="x", padx=PADX, pady=12)
         self._bind_setting_persistence()
@@ -2471,10 +2481,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if not stripped:
             box.insert("end", "\n", default_tags)
             return
-        if (
-            re.fullmatch(r"[-*_]\s*[-*_]\s*[-*_][\s\-*_]*", stripped)
-            or set(stripped) == {MD_RULE_CHAR}
-        ):
+        if self._is_md_rule_line(stripped):
             box.insert("end", "\n", default_tags)
             return
         heading = re.match(r"^(#{1,4})\s+(.+)$", stripped)
@@ -2510,6 +2517,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             pos = match.end()
         if pos < len(text):
             box.insert("end", text[pos:], default_tags)
+
+    def _is_md_rule_line(self, stripped):
+        return bool(stripped) and (
+            re.fullmatch(r"[-*_]\s*[-*_]\s*[-*_][\s\-*_]*", stripped)
+            or set(stripped) == {MD_RULE_CHAR}
+        )
 
     def _md_table_cells(self, line):
         if "|" not in line:
@@ -2630,14 +2643,19 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         try:
             if getattr(event, "delta", 0):
                 direction = 1 if event.delta < 0 else -1
+                units = max(1, min(3, abs(int(event.delta / 120)) * 2))
             elif getattr(event, "num", None) == 4:
                 direction = -1
+                units = 2
             elif getattr(event, "num", None) == 5:
                 direction = 1
+                units = 2
             else:
                 return "break"
-            first, _last = box._textbox.yview()
-            box._textbox.yview_moveto(max(0.0, min(1.0, first + direction * 0.04)))
+            first, last = box._textbox.yview()
+            visible = max(0.01, last - first)
+            step = max(0.006, min(0.022, visible * 0.22 * units))
+            box._textbox.yview_moveto(max(0.0, min(1.0, first + direction * step)))
         except Exception:
             pass
         return "break"
@@ -2707,6 +2725,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         rows = table_info["rows"]
         align = table_info["align"]
         col_count = table_info["col_count"]
+        try:
+            table_info["last_tb_width"] = box._textbox.winfo_width()
+        except Exception:
+            table_info["last_tb_width"] = None
         for child in table.winfo_children():
             child.destroy()
         table_info["cells"] = []
@@ -2746,12 +2768,34 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._bind_table_widget(cell, box, table_info)
 
     def _sync_table_widths(self, box):
+        box._md_table_resize_job = None
+        try:
+            current_width = box._textbox.winfo_width()
+        except Exception:
+            current_width = None
         for table_info in list(getattr(box, "_md_table_widgets", [])):
             try:
                 if table_info["frame"].winfo_exists():
+                    if (
+                        current_width is not None
+                        and table_info.get("last_tb_width") is not None
+                        and abs(current_width - table_info["last_tb_width"]) < 8
+                    ):
+                        continue
                     self._render_table_widget(table_info)
             except Exception:
                 pass
+
+    def _schedule_table_width_sync(self, box):
+        try:
+            job = getattr(box, "_md_table_resize_job", None)
+            if job is not None:
+                box.after_cancel(job)
+            box._md_table_resize_job = box.after(
+                120, lambda b=box: self._sync_table_widths(b)
+            )
+        except Exception:
+            self._sync_table_widths(box)
 
     def _insert_markdown_table(self, lines, box=None):
         box = box or self.qa_box
@@ -2795,7 +2839,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if not getattr(box, "_md_table_resize_bound", False):
             tb.bind(
                 "<Configure>",
-                lambda _event, b=box: self._sync_table_widths(b),
+                lambda _event, b=box: self._schedule_table_width_sync(b),
                 add="+",
             )
             box._md_table_resize_bound = True
@@ -2809,6 +2853,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         code_lines = []
         lines = text.splitlines()
         i = 0
+        blank_count = 0
         while i < len(lines):
             line = lines[i]
             if line.strip().startswith("```"):
@@ -2818,6 +2863,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     )
                     code_lines = []
                     in_code = False
+                    blank_count = 1
                 else:
                     in_code = True
                     code_lines = []
@@ -2827,19 +2873,34 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 code_lines.append(line)
                 i += 1
                 continue
+            stripped = line.strip()
+            if not stripped or self._is_md_rule_line(stripped):
+                if blank_count < 2:
+                    box.insert("end", "\n", ("qa_answer",))
+                    blank_count += 1
+                i += 1
+                continue
             if (
                 i + 1 < len(lines)
                 and self._md_table_cells(line)
                 and self._is_md_table_separator(lines[i + 1])
             ):
+                if blank_count >= 2:
+                    try:
+                        box.delete("end-2c", "end-1c")
+                    except Exception:
+                        pass
+                    blank_count = 1
                 table_lines = [line, lines[i + 1]]
                 i += 2
                 while i < len(lines) and self._md_table_cells(lines[i]):
                     table_lines.append(lines[i])
                     i += 1
                 self._insert_markdown_table(table_lines, box=box)
+                blank_count = 2
             else:
                 self._insert_markdown_line(line, box=box)
+                blank_count = 0
                 i += 1
         if in_code or code_lines:
             box.insert(
@@ -3329,23 +3390,48 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         msg = str(msg).rstrip()
         if not msg:
             return
-        self.log_box.configure(state="normal")
         if getattr(self, "_log_is_empty", False):
-            self.log_box.delete("0.0", "end")
-            self.log_box.configure(text_color=SLATE)
+            for box in getattr(self, "_log_boxes", [self.log_box]):
+                box.configure(state="normal")
+                box.delete("0.0", "end")
+                box.configure(text_color=SLATE)
             self._log_is_empty = False
-        self.log_box.insert("end", msg + "\n")
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
+            self._last_log_msg = None
+            self._last_log_count = 0
+
+        repeated = msg == getattr(self, "_last_log_msg", None)
+        if repeated:
+            self._last_log_count += 1
+            line = f"{msg} x{self._last_log_count}"
+        else:
+            self._last_log_msg = msg
+            self._last_log_count = 1
+            line = msg
+
+        for box in getattr(self, "_log_boxes", [self.log_box]):
+            box.configure(state="normal")
+            if repeated:
+                try:
+                    box.delete("end-2l linestart", "end-1l lineend")
+                    box.insert("end-1l linestart", line)
+                except Exception:
+                    box.insert("end", line + "\n")
+            else:
+                box.insert("end", line + "\n")
+            box.see("end")
+            box.configure(state="disabled")
 
     def _set_log_hint(self):
-        self.log_box.configure(state="normal", text_color=FAINT)
-        self.log_box.delete("0.0", "end")
-        self.log_box.insert(
-            "0.0",
-            "暂无输出\n开始翻译后，这里会显示运行状态、输出文件和错误信息\nCtrl+滚轮以缩放界面",
-        )
-        self.log_box.configure(state="disabled")
+        self._last_log_msg = None
+        self._last_log_count = 0
+        for box in getattr(self, "_log_boxes", [self.log_box]):
+            box.configure(state="normal", text_color=FAINT)
+            box.delete("0.0", "end")
+            box.insert(
+                "0.0",
+                "暂无输出\n开始翻译后，这里会显示运行状态、输出文件和错误信息\nCtrl+滚轮以缩放界面",
+            )
+            box.configure(state="disabled")
 
 
 def main():
