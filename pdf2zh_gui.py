@@ -975,6 +975,13 @@ class ScrollDropdown:
         except Exception:
             pass
 
+    def _close_on_parent_configure(self, event=None):
+        if self._popup is None:
+            return
+        if event is not None and event.widget is not self.owner.winfo_toplevel():
+            return
+        self.close()
+
     def open(self, x, y, width):
         self.close()
         row_h = 30
@@ -1072,8 +1079,13 @@ class ScrollDropdown:
             widget.bind("<Escape>", lambda _e: self.close(), add="+")
         self._reposition()
         self._outside_bind = top.bind("<Button-1>", self._maybe_close_from_click, add="+")
-        self._top_config_bind = top.bind("<Configure>", self._reposition, add="+")
-        self._owner_config_bind = self.owner.bind("<Configure>", self._reposition, add="+")
+        if self.external:
+            self._top_config_bind = top.bind(
+                "<Configure>", self._close_on_parent_configure, add="+"
+            )
+        else:
+            self._top_config_bind = top.bind("<Configure>", self._reposition, add="+")
+            self._owner_config_bind = self.owner.bind("<Configure>", self._reposition, add="+")
 
     def _select(self, value):
         self.close()
