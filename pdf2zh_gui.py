@@ -475,17 +475,20 @@ def save_prefs(prefs: dict):
 
 
 def quick_translate(stype: str, envs: dict, model: str, text: str,
-                    timeout: int = 25) -> str:
+                    timeout: int = 25, *, target_language: str = "简体中文") -> str:
     """One-shot dictionary-style lookup via the selected AI service."""
     if not model:
         raise ValueError("请先填写模型名称")
+    target_language = target_language.strip() or "简体中文"
     base, headers = _api_target(stype, envs)
     ask = (
-        "你是英汉双向词典助手。解释下面的单词或短语：\n"
-        "- 英文输入：给出音标、词性和中文释义，最多列 3 个常用义项\n"
-        "- 中文输入：给出对应的英文表达和例句\n"
+        "你是准确、简洁的多语言词典助手。解释下面的单词或短语：\n"
+        f"- 目标语言是{target_language}；释义、说明和例句翻译都必须使用该语言\n"
+        "- 查询词不是目标语言时，给出目标语言对应表达\n"
+        "- 查询词已是目标语言时，用目标语言解释，并按需补充常见英文表达\n"
+        "- 如有通行音标，给出音标和词性；最多列出 3 个常用义项\n"
         "- 若是专业术语，补充一句领域内含义\n"
-        "直接输出结果，不要寒暄，控制在 5 行以内。\n\n"
+        "直接输出 Markdown 结果，不要寒暄，保持简洁。\n\n"
         f"查询：{text}"
     )
     payload = {
@@ -2040,18 +2043,20 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         # settings card
         opt = self._card(parent=self._tab_pages["settings"])
         opt.grid_columnconfigure((1, 3, 5), weight=1)
-        ctk.CTkLabel(opt, text="翻译设置", font=self.f_section, text_color=INK).grid(
-            row=0, column=0, columnspan=5, padx=14, pady=(10, 0), sticky="w"
+        settings_header = ctk.CTkFrame(opt, fg_color="transparent")
+        settings_header.grid(
+            row=0, column=0, columnspan=6, padx=14, pady=(10, 0), sticky="w"
         )
+        ctk.CTkLabel(
+            settings_header, text="翻译设置", font=self.f_section, text_color=INK,
+        ).pack(side="left")
         self.update_btn = ctk.CTkButton(
-            opt, text="检查更新", width=88, height=28, font=self.f_small,
-            fg_color="transparent", border_width=1, border_color=LINE,
-            text_color=SLATE, hover_color=GHOST_H, corner_radius=8,
+            settings_header, text="↻  检查更新", width=92, height=26, font=self.f_small,
+            fg_color="transparent", border_width=0,
+            text_color=FAINT, hover_color=GHOST_H, corner_radius=7,
             command=self._check_updates,
         )
-        self.update_btn.grid(
-            row=0, column=5, padx=(4, 14), pady=(10, 0), sticky="e"
-        )
+        self.update_btn.pack(side="left", padx=(10, 0))
 
         self._label(opt, "翻译服务").grid(row=1, column=0, padx=(14, 4), pady=8, sticky="e")
         svc_box = ctk.CTkFrame(opt, fg_color="transparent")
@@ -2128,9 +2133,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._menu(opt, self.thread_var, ["1", "2", "4", "8"], 152).grid(
             row=3, column=3, padx=4, pady=(2, 10), sticky="w"
         )
+        self._label(opt, "翻译缓存").grid(
+            row=3, column=4, padx=(12, 4), pady=(2, 10), sticky="e"
+        )
         self.cache_var = ctk.BooleanVar(value=bool(self._prefs.get("ignore_cache", False)))
         ctk.CTkCheckBox(
-            opt, text="忽略翻译缓存", variable=self.cache_var,
+            opt, text="忽略", variable=self.cache_var,
             font=self.f_body, text_color=SLATE,
             fg_color=CLAY, hover_color=CLAY_DK, checkmark_color=WHITE,
             border_color="#B9B3A5", border_width=2, corner_radius=6,
@@ -2338,7 +2346,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         try:
             self.update_btn.configure(
                 state="disabled" if busy else "normal",
-                text="检查中..." if busy else "检查更新",
+                text="↻  检查中..." if busy else "↻  检查更新",
             )
         except Exception:
             pass
@@ -2358,7 +2366,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _check_updates(self):
         self._set_update_busy(True)
-        self._log("正在检查 GitHub 更新...")
+        self._log("正在拉取 GitHub 仓库更新...")
         threading.Thread(target=self._do_check_updates, daemon=True).start()
 
     def _do_check_updates(self):
@@ -3316,16 +3324,20 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             )
             return
         stype, envs, model = prof
+        target_language = self.lang_out_var.get()
         self.dict_btn.configure(state="disabled")
         self._set_dict_text(f"⏳ 正在查询 {query} ...", SLATE)
         threading.Thread(
-            target=self._do_dict_lookup, args=(stype, envs, model, query),
+            target=self._do_dict_lookup,
+            args=(stype, envs, model, query, target_language),
             daemon=True,
         ).start()
 
-    def _do_dict_lookup(self, stype, envs, model, query):
+    def _do_dict_lookup(self, stype, envs, model, query, target_language):
         try:
-            result = quick_translate(stype, envs, model, query)
+            result = quick_translate(
+                stype, envs, model, query, target_language=target_language
+            )
             if not result:
                 raise ValueError("接口返回为空")
             self._q.put(("dict_markdown", query, result, INK))

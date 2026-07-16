@@ -43,32 +43,63 @@ function Resolve-Python {
     throw "未找到 Python。请先安装 Python 3.11+，或设置 PDF2ZH_GUI_PYTHON 指向 python.exe。"
 }
 
-function Copy-AppFiles {
+function Resolve-Git {
+    $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+    if ($gitCmd) {
+        return $gitCmd.Source
+    }
+
+    throw "未找到 Git。请先安装 Git for Windows，并确保 git 命令已加入 PATH。"
+}
+
+function Clone-AppRepository {
     param([string]$Destination)
 
-    $scriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { "" }
-    if ($scriptDir -and (Test-Path -LiteralPath (Join-Path $scriptDir "pdf2zh_gui.py"))) {
-        $sourceDir = $scriptDir
-    } else {
-        $tmpRoot = Join-Path $env:TEMP "pdf2zh-gui-install"
-        $zipPath = Join-Path $tmpRoot "source.zip"
-        if (Test-Path -LiteralPath $tmpRoot) {
-            Remove-Item -LiteralPath $tmpRoot -Recurse -Force
+    $destinationPath = [IO.Path]::GetFullPath($Destination)
+    $parentDir = Split-Path -Parent $destinationPath
+    $folderName = Split-Path -Leaf $destinationPath
+    if (-not (Test-Path -LiteralPath $parentDir)) {
+        New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+    }
+
+    $suffix = [Guid]::NewGuid().ToString("N")
+    $stagingDir = Join-Path $parentDir "$folderName.installing-$suffix"
+    $backupDir = Join-Path $parentDir "$folderName.backup-$suffix"
+    $repoUrl = "https://github.com/$RepoOwner/$RepoName.git"
+    Write-Host "克隆 $repoUrl ($Branch)"
+
+    try {
+        & $script:GitExe clone --branch $Branch --single-branch $repoUrl $stagingDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "Git 仓库克隆失败。"
         }
-        New-Item -ItemType Directory -Path $tmpRoot | Out-Null
 
-        $zipUrl = "https://github.com/$RepoOwner/$RepoName/archive/refs/heads/$Branch.zip"
-        Write-Host "下载 $zipUrl"
-        Invoke-WebRequest -UseBasicParsing -Uri $zipUrl -OutFile $zipPath
-        Expand-Archive -LiteralPath $zipPath -DestinationPath $tmpRoot -Force
-        $sourceDir = (Get-ChildItem -LiteralPath $tmpRoot -Directory | Select-Object -First 1).FullName
+        if (Test-Path -LiteralPath $destinationPath) {
+            Move-Item -LiteralPath $destinationPath -Destination $backupDir
+        }
+        Move-Item -LiteralPath $stagingDir -Destination $destinationPath
+    }
+    catch {
+        if (
+            -not (Test-Path -LiteralPath $destinationPath) -and
+            (Test-Path -LiteralPath $backupDir)
+        ) {
+            Move-Item -LiteralPath $backupDir -Destination $destinationPath
+        }
+        if (Test-Path -LiteralPath $stagingDir) {
+            Remove-Item -LiteralPath $stagingDir -Recurse -Force
+        }
+        throw
     }
 
-    if (Test-Path -LiteralPath $Destination) {
-        Remove-Item -LiteralPath $Destination -Recurse -Force
+    if (Test-Path -LiteralPath $backupDir) {
+        try {
+            Remove-Item -LiteralPath $backupDir -Recurse -Force
+        }
+        catch {
+            Write-Warning "新版本已安装，但旧安装备份未能删除：$backupDir"
+        }
     }
-    New-Item -ItemType Directory -Path $Destination | Out-Null
-    Copy-Item -Path (Join-Path $sourceDir "*") -Destination $Destination -Recurse -Force
 }
 
 function New-DesktopShortcut {
@@ -105,8 +136,10 @@ function New-DesktopShortcut {
 
 $pythonExe = Resolve-Python -Preferred $Python
 Write-Host "使用 Python: $pythonExe"
+$script:GitExe = Resolve-Git
+Write-Host "使用 Git: $script:GitExe"
 
-Copy-AppFiles -Destination $InstallDir
+Clone-AppRepository -Destination $InstallDir
 
 Write-Host "安装依赖..."
 & $pythonExe -m pip install -r (Join-Path $InstallDir "requirements.txt")
