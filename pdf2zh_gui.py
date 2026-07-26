@@ -8,12 +8,11 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
-from string import Template
-from urllib.parse import urlsplit
 
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
@@ -24,577 +23,55 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
+# launched by double-click, the script directory may not be on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import tkinter.font as tkfont
 import tkinter as tk
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+from pdf2zh_core import (
+    DEFAULT_NOTES,
+    LANGS,
+    OUTPUT_MODES,
+    PROXY_MODES,
+    PROXY_MODE_LABELS,
+    QA_HISTORY_LIMIT,
+    REPO_URL,
+    SERVICE_BACKEND,
+    SERVICE_PLACEHOLDER,
+    SERVICE_SCHEMAS,
+    SERVICE_TYPE_LABELS,
+    TYPE_LABEL_TO_KEY,
+    __version__,
+    _normalize_base_url,
+    build_prompt_template,
+    download_and_extract,
+    fetch_models,
+    get_proxy_settings,
+    github_latest_commit,
+    load_prefs,
+    load_profiles,
+    parse_pages,
+    patch_pdf2zh_runtime,
+    quick_ask,
+    quick_translate,
+    save_prefs,
+    save_profiles,
+    select_outputs,
+    set_proxy_settings,
+    set_translate_max_tokens,
+    test_service,
+)
+
 TITLE_ICON_PATH = Path(__file__).with_name("star.ico")
 TITLE_ICON_PNG_PATH = Path(__file__).with_name("star.png")
 APP_ICON_PATH = Path(__file__).with_name("pdf_translate_icon_full.ico")
 TITLE_TEXT_GAP = "\u00A0\u00A0"
-CONFIG_PATH = Path.home() / ".config" / "PDFMathTranslate" / "config.json"
-
-LANGS = {
-    "English": "en",
-    "简体中文": "zh",
-    "繁體中文": "zh-TW",
-    "日本語": "ja",
-    "한국어": "ko",
-    "Français": "fr",
-    "Deutsch": "de",
-    "Español": "es",
-    "Русский": "ru",
-}
-OUTPUT_MODES = {
-    "双语 + 中文": "both",
-    "仅双语": "dual",
-    "仅中文": "mono",
-}
-SERVICE_PLACEHOLDER = "请添加服务"
 GEOMETRY_PREF_VERSION = 4
-QA_HISTORY_LIMIT = 10
 MD_RULE_CHAR = "─"
-
-DEFAULT_NOTES = "保留所有英文人名、地名不翻译"
-
-# $lang_in/$lang_out/$text are substituted by pdf2zh; $notes by the GUI
-PROMPT_WITH_NOTES = Template(
-    "You are a professional, authentic machine translation engine. "
-    "Only Output the translated text, do not include any other text."
-    "\n\nTranslation notes (follow strictly):\n$notes\n\n"
-    "Translate the following markdown source text to $lang_out. "
-    "Keep the formula notation {v*} unchanged. "
-    "Output translation directly without any additional text."
-    "\n\nSource Text: $text\n\nTranslated Text:"
-)
-
-
-def build_prompt_template(notes: str):
-    """-> Template for pdf2zh, or None to use its stock prompt."""
-    notes = notes.strip()
-    if not notes:
-        return None
-    lines = "\n".join(
-        f"- {ln.strip()}" for ln in notes.splitlines() if ln.strip()
-    )
-    return Template(PROMPT_WITH_NOTES.safe_substitute({"notes": lines}))
-
-# (env_key, label, required, secret, default)
-SERVICE_SCHEMAS = {
-    "openailiked": [
-        ("OPENAILIKED_BASE_URL", "Base URL", True, False, "https://"),
-        ("OPENAILIKED_API_KEY", "API Key", False, True, ""),
-        ("OPENAILIKED_MODEL", "模型名称", True, False, ""),
-    ],
-    "anthropic": [
-        ("OPENAILIKED_BASE_URL", "Base URL", True, False, "https://api.anthropic.com/v1/"),
-        ("OPENAILIKED_API_KEY", "API Key", True, True, ""),
-        ("OPENAILIKED_MODEL", "模型名称", True, False, "claude-sonnet-4-6"),
-    ],
-    "claudeliked": [
-        ("OPENAILIKED_BASE_URL", "Base URL", True, False, "https://"),
-        ("OPENAILIKED_API_KEY", "API Key", False, True, ""),
-        ("OPENAILIKED_MODEL", "模型名称", True, False, "claude-3-5-sonnet-20241022"),
-    ],
-    "openai": [
-        ("OPENAI_BASE_URL", "Base URL", False, False, "https://api.openai.com/v1"),
-        ("OPENAI_API_KEY", "API Key", True, True, ""),
-        ("OPENAI_MODEL", "模型名称", False, False, "gpt-4o-mini"),
-    ],
-    "deepseek": [
-        ("DEEPSEEK_API_KEY", "API Key", True, True, ""),
-        ("DEEPSEEK_MODEL", "模型名称", False, False, "deepseek-chat"),
-    ],
-    "gemini": [
-        ("GEMINI_API_KEY", "API Key", True, True, ""),
-        ("GEMINI_MODEL", "模型名称", False, False, "gemini-1.5-flash"),
-    ],
-    "zhipu": [
-        ("ZHIPU_API_KEY", "API Key", True, True, ""),
-        ("ZHIPU_MODEL", "模型名称", False, False, "glm-4-flash"),
-    ],
-    "silicon": [
-        ("SILICON_API_KEY", "API Key", True, True, ""),
-        ("SILICON_MODEL", "模型名称", False, False, "Qwen/Qwen2.5-7B-Instruct"),
-    ],
-    "grok": [
-        ("GROK_API_KEY", "API Key", True, True, ""),
-        ("GROK_MODEL", "模型名称", False, False, "grok-2-1212"),
-    ],
-    "groq": [
-        ("GROQ_API_KEY", "API Key", True, True, ""),
-        ("GROQ_MODEL", "模型名称", False, False, "llama-3-3-70b-versatile"),
-    ],
-    "ollama": [
-        ("OLLAMA_HOST", "服务地址", False, False, "http://127.0.0.1:11434"),
-        ("OLLAMA_MODEL", "模型名称", True, False, "gemma2"),
-    ],
-    "azure-openai": [
-        ("AZURE_OPENAI_BASE_URL", "Base URL", True, False, "https://xxx.openai.azure.com"),
-        ("AZURE_OPENAI_API_KEY", "API Key", True, True, ""),
-        ("AZURE_OPENAI_MODEL", "部署/模型名", False, False, "gpt-4o-mini"),
-        ("AZURE_OPENAI_API_VERSION", "API 版本", False, False, "2024-06-01"),
-    ],
-}
-SERVICE_TYPE_LABELS = {
-    "openai": "OpenAI 官方",
-    "anthropic": "Claude 官方",
-    "openailiked": "OpenAI 兼容",
-    "claudeliked": "Claude 兼容",
-    "deepseek": "DeepSeek",
-    "gemini": "Google Gemini",
-    "zhipu": "智谱 GLM",
-    "silicon": "硅基流动 SiliconFlow",
-    "grok": "xAI Grok",
-    "groq": "Groq",
-    "ollama": "Ollama 本地",
-    "azure-openai": "Azure OpenAI",
-}
-TYPE_LABEL_TO_KEY = {v: k for k, v in SERVICE_TYPE_LABELS.items()}
-
-# GUI type -> pdf2zh service name (anthropic rides the OpenAI-compatible channel)
-SERVICE_BACKEND = {"anthropic": "openailiked", "claudeliked": "openailiked"}
-
-# fixed REST bases for providers whose translator hardcodes the URL
-PROVIDER_FIXED_BASE = {
-    "deepseek": "https://api.deepseek.com/v1",
-    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
-    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
-    "silicon": "https://api.siliconflow.cn/v1",
-    "grok": "https://api.x.ai/v1",
-    "groq": "https://api.groq.com/openai/v1",
-}
-
-# Services where we smart-complete the base URL (openailiked-style)
-_BASE_SUFFIX_HINTS = {"openailiked": "/v1", "anthropic": "/v1", "claudeliked": "/v1"}
-
-
-def _normalize_base_url(raw: str, stype: str = "openailiked") -> str:
-    """Smart-complete partial URLs to the correct chat-completion root.
-
-    Handles:
-      "https://api.anthropic.com"       → "https://api.anthropic.com/v1"
-      "https://api.anthropic.com/"      → "https://api.anthropic.com/v1"
-      "https://api.anthropic.com/v1"    → "https://api.anthropic.com/v1"
-      "http://localhost:8000"           → "http://localhost:8000/v1"
-    """
-    url = raw.strip().rstrip("/")
-    if not url:
-        return raw.strip()
-    if stype in _BASE_SUFFIX_HINTS:
-        suffix = _BASE_SUFFIX_HINTS[stype]
-        # Only inspect the URL path. Domains such as api.longcat.chat should
-        # not count as an existing /api segment.
-        path = urlsplit(url).path.rstrip("/")
-        for pat in ("/v1", "/v2", "/api", "/v1beta"):
-            if path == pat or path.startswith(pat + "/") or path.endswith(pat):
-                return url
-        return url + suffix
-    if stype in PROVIDER_FIXED_BASE and "/" not in url.split("://")[1]:
-        return PROVIDER_FIXED_BASE[stype]
-    return url
-
-
-def _api_target(stype: str, envs: dict):
-    """-> (base_url, headers) for direct REST calls (test / list models)."""
-    def need(key, label):
-        v = (envs.get(key) or "").strip()
-        if not v:
-            raise ValueError(f"请先填写 {label}")
-        return v
-
-    if stype == "ollama":
-        base = (envs.get("OLLAMA_HOST") or "http://127.0.0.1:11434").strip()
-        return base.rstrip("/"), {}
-    if stype == "azure-openai":
-        return (
-            need("AZURE_OPENAI_BASE_URL", "Base URL").rstrip("/"),
-            {"api-key": need("AZURE_OPENAI_API_KEY", "API Key")},
-        )
-    if stype in ("openailiked", "anthropic", "claudeliked"):
-        raw = need("OPENAILIKED_BASE_URL", "Base URL")
-        base = _normalize_base_url(raw, stype).rstrip("/")
-        key = (envs.get("OPENAILIKED_API_KEY") or "").strip()
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
-        if stype in ("anthropic", "claudeliked") or "anthropic.com" in base or "/anthropic" in base:
-            if not key:
-                raise ValueError("请先填写 API Key")
-            headers["x-api-key"] = key
-            headers["anthropic-version"] = "2023-06-01"
-        return base, headers
-    base = (
-        PROVIDER_FIXED_BASE.get(stype)
-        or (envs.get("OPENAI_BASE_URL") or "").strip()
-        or "https://api.openai.com/v1"
-    ).rstrip("/")
-    key = need(f"{stype.upper().replace('-', '_')}_API_KEY", "API Key")
-    return base, {"Authorization": f"Bearer {key}"}
-
-
-_PROXY = "http://127.0.0.1:10808"  # socks5h too; use http for Windows compat
-
-
-def patch_pdf2zh_runtime():
-    """Runtime compatibility patches kept local to this desktop GUI."""
-    try:
-        import requests
-        from pdf2zh import pdfinterp, translator
-    except Exception:
-        return
-
-    cls = getattr(translator, "OpenAITranslator", None)
-    if cls is not None and not getattr(cls, "_pdf2zh_gui_messages_patch", False):
-        orig_init = cls.__init__
-        orig_do_translate = cls.do_translate
-
-        def patched_init(
-            self, lang_in, lang_out, model, base_url=None, api_key=None,
-            envs=None, prompt=None, ignore_cache=False,
-        ):
-            orig_init(
-                self, lang_in, lang_out, model, base_url=base_url,
-                api_key=api_key, envs=envs, prompt=prompt,
-                ignore_cache=ignore_cache,
-            )
-            raw_base = (
-                base_url
-                or getattr(self, "_base_url", "")
-                or getattr(self, "envs", {}).get("OPENAI_BASE_URL")
-                or getattr(self, "envs", {}).get("OPENAILIKED_BASE_URL")
-                or ""
-            )
-            raw_key = (
-                api_key
-                or getattr(self, "_api_key", "")
-                or getattr(self, "envs", {}).get("OPENAI_API_KEY")
-                or getattr(self, "envs", {}).get("OPENAILIKED_API_KEY")
-                or ""
-            )
-            self._pdf2zh_gui_base_url = str(raw_base).rstrip("/")
-            self._pdf2zh_gui_api_key = str(raw_key)
-            self._pdf2zh_gui_use_messages = bool(
-                self._pdf2zh_gui_base_url
-                and (
-                    "/anthropic" in self._pdf2zh_gui_base_url
-                    or "anthropic.com" in self._pdf2zh_gui_base_url
-                )
-            )
-
-        def native_messages_translate(self, text):
-            key = getattr(self, "_pdf2zh_gui_api_key", "")
-            base = getattr(self, "_pdf2zh_gui_base_url", "").rstrip("/")
-            payload = {
-                "model": self.model,
-                "max_tokens": 4096,
-                "temperature": getattr(self, "options", {}).get("temperature", 0),
-                "messages": self.prompt(text, getattr(self, "prompttext", None)),
-            }
-            headers = {
-                "Authorization": f"Bearer {key}",
-                "x-api-key": key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            }
-            resp = requests.post(
-                f"{base}/messages", headers=headers, json=payload,
-                timeout=(15, 120),
-            )
-            try:
-                resp.raise_for_status()
-            except requests.HTTPError as exc:
-                raise ValueError(
-                    f"HTTP {resp.status_code} from Anthropic-compatible service: "
-                    f"{resp.text[:500]}"
-                ) from exc
-            data = resp.json()
-            parts = data.get("content") or []
-            if isinstance(parts, str):
-                content = parts.strip()
-            else:
-                content = "".join(
-                    p.get("text", "") if isinstance(p, dict) else str(p)
-                    for p in parts
-                ).strip()
-            if not content:
-                raise ValueError("Empty response from Anthropic-compatible service")
-            regex = getattr(self, "think_filter_regex", None)
-            return regex.sub("", content).strip() if regex else content
-
-        def patched_do_translate(self, text):
-            if getattr(self, "_pdf2zh_gui_use_messages", False):
-                return native_messages_translate(self, text)
-            return orig_do_translate(self, text)
-
-        cls.__init__ = patched_init
-        cls.do_translate = patched_do_translate
-        cls._pdf2zh_gui_messages_patch = True
-
-    interp = getattr(pdfinterp, "PDFPageInterpreterEx", None)
-    if interp is not None and not getattr(interp, "_pdf2zh_gui_scs_patch", False):
-        orig_interp_init = interp.__init__
-
-        def patched_interp_init(self, *args, **kwargs):
-            orig_interp_init(self, *args, **kwargs)
-            if not hasattr(self, "scs"):
-                self.scs = None
-
-        interp.__init__ = patched_interp_init
-        interp._pdf2zh_gui_scs_patch = True
-
-
-def _http(timeout: int):
-    """httpx Client with proxy fallback (new httpx uses proxy=, old uses proxies=)."""
-    import httpx
-
-    try:
-        return httpx.Client(timeout=timeout, follow_redirects=True,
-                            proxy=_PROXY)
-    except TypeError:
-        return httpx.Client(timeout=timeout, follow_redirects=True,
-                            proxies=_PROXY)
-    except Exception:
-        return httpx.Client(timeout=timeout, follow_redirects=True)
-
-
-def fetch_models(stype: str, envs: dict) -> list[str]:
-    if stype == "azure-openai":
-        raise ValueError("Azure 使用部署名，请到 Azure 门户查看")
-    import httpx
-    from httpx import TimeoutException
-    base, headers = _api_target(stype, envs)
-    try:
-        with _http(10) as c:
-            if stype == "ollama":
-                r = c.get(f"{base}/api/tags")
-                r.raise_for_status()
-                return sorted(m["name"] for m in r.json().get("models", []))
-            # Anthropic-native endpoints use GET <base>/models (no results key)
-            r = c.get(f"{base}/models", headers=headers)
-            if r.status_code >= 400:
-                raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
-            data = r.json()
-            ids = [m.get("id", "") for m in data.get("data", []) if m.get("id")]
-            ids = [i[7:] if i.startswith("models/") else i for i in ids]
-            if not ids:
-                raise ValueError("接口未返回任何模型")
-            return sorted(set(ids))
-    except TimeoutException:
-        raise TimeoutError(
-            f"超过 10 秒未响应，请检查：\n"
-            f"① 网络代理（本机建议开 10808）\n"
-            f"② API Key 是否正确\n"
-            f"③ Base URL 是否可访问"
-        )
-
-
-def test_service(  # type: ignore[no-redef]
-    stype: str, envs: dict, model: str, timeout: int = 10
-) -> str:
-    """Minimal 1-token chat round-trip with user-friendly timeout message."""
-    import httpx
-    from httpx import TimeoutException as _TimeoutException
-
-    base, headers = _api_target(stype, envs)
-
-    try:
-        with _http(timeout) as c:
-            if stype == "ollama":
-                r = c.get(f"{base}/api/tags")
-                r.raise_for_status()
-                names = [m["name"] for m in r.json().get("models", [])]
-                if model and model not in names and f"{model}:latest" not in names:
-                    raise ValueError(
-                        f"服务已连通，但本地没有模型 {model}"
-                        f"（已装：{', '.join(names[:6]) or '无'}）"
-                    )
-                return "Ollama 连接正常" + (f"，模型 {model} 可用" if model else "")
-            if not model:
-                raise ValueError("请先填写模型名称")
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_tokens": 1,
-            }
-            if stype == "azure-openai":
-                ver = (envs.get("AZURE_OPENAI_API_VERSION") or "2024-06-01").strip()
-                url = f"{base}/openai/deployments/{model}/chat/completions?api-version={ver}"
-                r = c.post(url, headers=headers, json=payload)
-            elif stype in ("anthropic", "claudeliked") or "/anthropic" in base or "anthropic.com" in base:
-                # LongCat / custom Claude-like gateways may speak Anthropic-native
-                # POST <base>/messages rather than /chat/completions
-                if "/anthropic" in base or "anthropic.com" in base:
-                    r = c.post(f"{base}/messages", headers=headers, json=payload)
-                else:
-                    try:
-                        r = c.post(f"{base}/chat/completions", headers=headers, json=payload)
-                        if r.status_code in (404, 405):
-                            raise Exception  # fall through to /messages
-                    except Exception:
-                        r = c.post(f"{base}/messages", headers=headers, json=payload)
-            else:
-                r = c.post(f"{base}/chat/completions", headers=headers, json=payload)
-            if r.status_code >= 400:
-                raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
-            return f"连接成功，{model} 响应正常"
-    except _TimeoutException:
-        raise TimeoutError(
-            f"超过 {timeout} 秒未响应，请检查：\n"
-            f"① 网络代理（本机建议开 10808）\n"
-            f"② API Key 是否正确\n"
-            f"③ Base URL 是否可访问"
-        )
-
-GUI_SERVICES_PATH = CONFIG_PATH.with_name("gui_services.json")
-GUI_PREFS_PATH = CONFIG_PATH.with_name("gui_prefs.json")
-DEFAULT_GUI_PREFS_PATH = Path(__file__).with_name("default_gui_prefs.json")
-
-
-def load_prefs() -> dict:
-    prefs = {}
-    try:
-        prefs.update(json.loads(DEFAULT_GUI_PREFS_PATH.read_text(encoding="utf-8")))
-    except Exception:
-        pass
-    try:
-        prefs.update(json.loads(GUI_PREFS_PATH.read_text(encoding="utf-8")))
-    except Exception:
-        pass
-    return prefs
-
-
-def save_prefs(prefs: dict):
-    try:
-        GUI_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        GUI_PREFS_PATH.write_text(
-            json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except Exception:
-        pass
-
-
-def quick_translate(stype: str, envs: dict, model: str, text: str,
-                    timeout: int = 25, *, target_language: str = "简体中文") -> str:
-    """One-shot dictionary-style lookup via the selected AI service."""
-    if not model:
-        raise ValueError("请先填写模型名称")
-    target_language = target_language.strip() or "简体中文"
-    base, headers = _api_target(stype, envs)
-    ask = (
-        "你是准确、简洁的多语言词典助手。解释下面的单词或短语：\n"
-        f"- 目标语言是{target_language}；释义、说明和例句翻译都必须使用该语言\n"
-        "- 查询词不是目标语言时，给出目标语言对应表达\n"
-        "- 查询词已是目标语言时，用目标语言解释，并按需补充常见英文表达\n"
-        "- 如有通行音标，给出音标和词性；最多列出 3 个常用义项\n"
-        "- 若是专业术语，补充一句领域内含义\n"
-        "直接输出 Markdown 结果，不要寒暄，保持简洁。\n\n"
-        f"查询：{text}"
-    )
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": ask}],
-        "max_tokens": 500,
-        "temperature": 0,
-    }
-    with _http(timeout) as c:
-        if stype == "ollama":
-            r = c.post(f"{base}/api/chat",
-                       json={"model": model, "stream": False,
-                             "messages": payload["messages"]})
-            if r.status_code >= 400:
-                raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
-            return (r.json().get("message", {}).get("content") or "").strip()
-        if stype == "azure-openai":
-            ver = (envs.get("AZURE_OPENAI_API_VERSION") or "2024-06-01").strip()
-            url = f"{base}/openai/deployments/{model}/chat/completions?api-version={ver}"
-            r = c.post(url, headers=headers, json=payload)
-        elif stype in ("anthropic", "claudeliked") or "/anthropic" in base or "anthropic.com" in base:
-            r = c.post(f"{base}/messages", headers=headers, json=payload)
-        else:
-            r = c.post(f"{base}/chat/completions", headers=headers, json=payload)
-        if r.status_code >= 400:
-            raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
-        data = r.json()
-        if "choices" in data:  # OpenAI flavor
-            return (data["choices"][0]["message"]["content"] or "").strip()
-        parts = data.get("content") or []  # Anthropic flavor
-        if isinstance(parts, str):
-            return parts.strip()
-        return "".join(
-            p.get("text", "") if isinstance(p, dict) else str(p) for p in parts
-        ).strip()
-
-
-def quick_ask(stype: str, envs: dict, model: str, question: str,
-              history: list[dict], timeout: int = 35) -> str:
-    """Short literature-reading Q&A via the selected AI service."""
-    if not model:
-        raise ValueError("请先填写模型名称")
-    question = question.strip()
-    if not question:
-        raise ValueError("请输入要提问的内容")
-    base, headers = _api_target(stype, envs)
-    system_prompt = (
-        "你是文献阅读时使用的快问快答助手。回答用户临时提出的小问题，"
-        "重点是准确、简洁、直接，不要寒暄。若问题和论文、学术概念、"
-        "英文表达或技术术语有关，优先给出面向阅读理解的解释。"
-        "不确定时明确说明不确定，不要编造。"
-    )
-    turns = []
-    for item in (history or [])[-QA_HISTORY_LIMIT:]:
-        prev_q = str(item.get("question", "")).strip()
-        prev_a = str(item.get("answer", "")).strip()
-        if not prev_q or not prev_a:
-            continue
-        turns.append({"role": "user", "content": prev_q[:1200]})
-        turns.append({"role": "assistant", "content": prev_a[:1600]})
-    turns.append({"role": "user", "content": question})
-
-    common = {"model": model, "max_tokens": 900, "temperature": 0.2}
-    with _http(timeout) as c:
-        if stype == "ollama":
-            messages = [{"role": "system", "content": system_prompt}] + turns
-            r = c.post(
-                f"{base}/api/chat",
-                json={
-                    "model": model,
-                    "stream": False,
-                    "messages": messages,
-                    "options": {"temperature": 0.2, "num_predict": 900},
-                },
-            )
-            if r.status_code >= 400:
-                raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
-            return (r.json().get("message", {}).get("content") or "").strip()
-        if stype == "azure-openai":
-            ver = (envs.get("AZURE_OPENAI_API_VERSION") or "2024-06-01").strip()
-            url = f"{base}/openai/deployments/{model}/chat/completions?api-version={ver}"
-            payload = {
-                **common,
-                "messages": [{"role": "system", "content": system_prompt}] + turns,
-            }
-            r = c.post(url, headers=headers, json=payload)
-        elif stype in ("anthropic", "claudeliked") or "/anthropic" in base or "anthropic.com" in base:
-            payload = {**common, "system": system_prompt, "messages": turns}
-            r = c.post(f"{base}/messages", headers=headers, json=payload)
-        else:
-            payload = {
-                **common,
-                "messages": [{"role": "system", "content": system_prompt}] + turns,
-            }
-            r = c.post(f"{base}/chat/completions", headers=headers, json=payload)
-        if r.status_code >= 400:
-            raise ValueError(f"HTTP {r.status_code}：{r.text[:160]}")
-        data = r.json()
-        if "choices" in data:
-            return (data["choices"][0]["message"]["content"] or "").strip()
-        parts = data.get("content") or []
-        if isinstance(parts, str):
-            return parts.strip()
-        return "".join(
-            p.get("text", "") if isinstance(p, dict) else str(p) for p in parts
-        ).strip()
 
 # ---- Anthropic palette ----
 IVORY = "#F0EEE6"      # window background
@@ -666,63 +143,6 @@ def set_window_icon(window, set_default=False):
             window.iconbitmap(default=str(icon_path))
         except Exception:
             pass
-
-
-def load_config() -> dict:
-    try:
-        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def load_profiles() -> list[dict]:
-    """User-defined AI services, with URL normalization for stored records."""
-    try:
-        data = json.loads(GUI_SERVICES_PATH.read_text(encoding="utf-8"))
-        result = []
-        for p in data:
-            if not (p.get("display") and p.get("type") in SERVICE_SCHEMAS):
-                continue
-            stype = p["type"]
-            envs = p.get("envs", {})
-            # auto-fix any base-url fields that were saved before smart-normalize
-            for k, v in list(envs.items()):
-                if v and (k.endswith("BASE_URL") or k.endswith("HOST")):
-                    envs[k] = _normalize_base_url(v, stype)
-            result.append(p)
-        return result
-    except Exception:
-        return []
-
-
-def save_profiles(profiles: list[dict]):
-    GUI_SERVICES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    GUI_SERVICES_PATH.write_text(
-        json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
-def parse_pages(text: str):
-    """'1,3,5-8' (1-based) -> [0,2,4,5,6,7]; empty/全部 -> None."""
-    text = text.strip()
-    if not text or text in ("全部", "all", "ALL"):
-        return None
-    pages = []
-    for part in text.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
-        if m:
-            a, b = int(m.group(1)), int(m.group(2))
-            if a < 1 or b < a:
-                raise ValueError(part)
-            pages.extend(range(a - 1, b))
-        elif part.isdigit() and int(part) >= 1:
-            pages.append(int(part) - 1)
-        else:
-            raise ValueError(part)
-    return sorted(set(pages))
 
 
 class QueueLogHandler(logging.Handler):
@@ -1655,6 +1075,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._prefs_save_job = None
         self._geometry_save_ready = False
         self._is_scaling = False
+        self._update_btn_text = "↻  检查更新"
+
+        # network + translation limits come from prefs before anything talks HTTP
+        set_proxy_settings(
+            self._prefs.get("proxy_mode", "system"),
+            self._prefs.get("proxy_url", ""),
+        )
+        set_translate_max_tokens(self._prefs.get("max_tokens", 4096))
 
         fams = set(tkfont.families(self))
 
@@ -1672,6 +1100,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.f_body = ctk.CTkFont(family=ui, size=13)
         self.f_small = ctk.CTkFont(family=ui, size=11)
         self.f_section = ctk.CTkFont(family=ui, size=12, weight="bold")
+        self.f_tab_on = ctk.CTkFont(family=ui, size=13, weight="bold")
         self.f_btn = ctk.CTkFont(family=ui, size=14, weight="bold")
         self.f_title = ctk.CTkFont(family=serif, size=26, weight="bold")
         self.f_sub = ctk.CTkFont(family=serif, size=12)
@@ -1695,6 +1124,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.after(1200, self._enable_geometry_save)
         self.after(150, self._style_titlebar)
         self.after(100, self._poll)
+        self.after(4000, self._maybe_auto_check_updates)
         self.after_idle(self._show_startup_window)
 
     # ---------- zoom (Ctrl+wheel) ----------
@@ -1857,9 +1287,24 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         opts = self._service_options()
         saved = self._prefs.get("service")
         self.service_var.set(saved if saved in opts else opts[0])
+        self._refresh_service_hint()
+
+    def _refresh_service_hint(self):
+        """Keep the current service visible from the 翻译 tab too."""
+        sel = self.service_var.get()
+        try:
+            if sel.startswith("★ "):
+                self.service_hint.configure(text=f"当前服务 · {sel[2:]}", text_color=FAINT)
+            else:
+                self.service_hint.configure(
+                    text="尚未配置翻译服务", text_color=COLOR_FAIL
+                )
+        except Exception:
+            pass
 
     def _on_service_selected(self, value):
         self._prefs["service"] = value
+        self._refresh_service_hint()
         self._save_settings_prefs()
 
     def _profile_by_display(self, display: str):
@@ -1948,7 +1393,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             border_color=CLAY if accent else LINE,
             text_color=CLAY if accent else SLATE,
             hover_color=TINT if accent else GHOST_H,
-            corner_radius=8, height=32, **kw,
+            corner_radius=8, height=32, cursor="hand2", **kw,
         )
 
     def _menu(self, parent, var, values, width):
@@ -1969,9 +1414,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         header.pack(fill="x", padx=PADX, pady=(14, 6))
         tbox = ctk.CTkFrame(header, fg_color="transparent")
         tbox.pack(side="left", padx=(4, 0))
-        ctk.CTkLabel(tbox, text="PDF Translator", font=self.f_title, text_color=INK).pack(
-            anchor="w"
-        )
+        title_row = ctk.CTkFrame(tbox, fg_color="transparent")
+        title_row.pack(anchor="w")
+        ctk.CTkLabel(
+            title_row, text="PDF Translator", font=self.f_title, text_color=INK
+        ).pack(side="left")
+        ctk.CTkLabel(
+            title_row, text=f"v{__version__}", font=self.f_small, text_color=FAINT
+        ).pack(side="left", anchor="s", padx=(8, 0), pady=(0, 5))
         tabs = ctk.CTkFrame(
             header, fg_color=BAR_BG, corner_radius=10, border_width=1,
             border_color=LINE,
@@ -1987,7 +1437,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             btn = ctk.CTkButton(
                 tabs, text=text, width=82, height=30, font=self.f_body,
                 fg_color="transparent", hover_color=GHOST_H, text_color=SLATE,
-                corner_radius=8, command=lambda k=key: self._show_tab(k),
+                corner_radius=8, cursor="hand2",
+                command=lambda k=key: self._show_tab(k),
             )
             btn.pack(side="left", padx=3, pady=3)
             self._tab_btns[key] = btn
@@ -2045,18 +1496,21 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         opt.grid_columnconfigure((1, 3, 5), weight=1)
         settings_header = ctk.CTkFrame(opt, fg_color="transparent")
         settings_header.grid(
-            row=0, column=0, columnspan=6, padx=14, pady=(10, 0), sticky="w"
+            row=0, column=0, columnspan=6, padx=14, pady=(10, 0), sticky="ew"
         )
         ctk.CTkLabel(
             settings_header, text="翻译设置", font=self.f_section, text_color=INK,
         ).pack(side="left")
+        ctk.CTkLabel(
+            settings_header, text="修改后自动保存", font=self.f_small, text_color=FAINT,
+        ).pack(side="left", padx=(10, 0))
         self.update_btn = ctk.CTkButton(
             settings_header, text="↻  检查更新", width=92, height=26, font=self.f_small,
             fg_color="transparent", border_width=0,
             text_color=FAINT, hover_color=GHOST_H, corner_radius=7,
-            command=self._check_updates,
+            cursor="hand2", command=self._check_updates,
         )
-        self.update_btn.pack(side="left", padx=(10, 0))
+        self.update_btn.pack(side="right")
 
         self._label(opt, "翻译服务").grid(row=1, column=0, padx=(14, 4), pady=8, sticky="e")
         svc_box = ctk.CTkFrame(opt, fg_color="transparent")
@@ -2144,17 +1598,45 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             border_color="#B9B3A5", border_width=2, corner_radius=6,
         ).grid(row=3, column=5, padx=(4, 14), pady=(2, 10), sticky="w")
 
-        # row 4 — translator guidance baked into the LLM prompt, persisted
+        # hairline: everything below is about the network / the prompt
+        ctk.CTkFrame(opt, height=1, fg_color=LINE, corner_radius=0).grid(
+            row=4, column=0, columnspan=6, padx=14, pady=(6, 2), sticky="ew"
+        )
+
+        # row 5 — how requests reach the network (no hardcoded proxy anymore)
+        self._label(opt, "网络代理").grid(row=5, column=0, padx=(14, 4), pady=8, sticky="e")
+        saved_mode = self._prefs.get("proxy_mode", "system")
+        self.proxy_mode_var = ctk.StringVar(
+            value=PROXY_MODE_LABELS.get(saved_mode, "跟随系统")
+        )
+        self._menu(opt, self.proxy_mode_var, list(PROXY_MODES), 152).grid(
+            row=5, column=1, padx=4, pady=8, sticky="w"
+        )
+        self.proxy_entry = ctk.CTkEntry(
+            opt, placeholder_text="http://127.0.0.1:7890", height=30,
+            fg_color=WHITE, border_color=LINE, border_width=1,
+            text_color=INK, placeholder_text_color=FAINT,
+            corner_radius=8, font=self.f_body,
+        )
+        self.proxy_entry.grid(
+            row=5, column=2, columnspan=4, padx=(12, 14), pady=8, sticky="ew"
+        )
+        if self._prefs.get("proxy_url"):
+            self.proxy_entry.insert(0, self._prefs["proxy_url"])
+        self.proxy_mode_var.trace_add("write", lambda *_: self._on_proxy_changed())
+        self.proxy_entry.bind("<KeyRelease>", lambda _e: self._on_proxy_changed())
+
+        # row 6 — translator guidance baked into the LLM prompt, persisted
         self._label(opt, "注意事项").grid(
-            row=4, column=0, padx=(14, 4), pady=(2, 12), sticky="e"
+            row=6, column=0, padx=(14, 4), pady=(2, 12), sticky="ne"
         )
         self.notes_entry = ctk.CTkTextbox(
-            opt, height=144, wrap="word", activate_scrollbars=False,
+            opt, height=120, wrap="word", activate_scrollbars=False,
             fg_color=WHITE, border_color=LINE, border_width=1,
             text_color=INK, corner_radius=8, font=self.f_body,
         )
         self.notes_entry.grid(
-            row=4, column=1, columnspan=5, padx=(4, 14), pady=(2, 12), sticky="ew"
+            row=6, column=1, columnspan=5, padx=(4, 14), pady=(2, 12), sticky="ew"
         )
         saved_notes = self._prefs.get("notes", DEFAULT_NOTES)
         if saved_notes:
@@ -2200,7 +1682,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             side="left"
         )
         ctk.CTkLabel(
-            qa_top, text="使用翻译设置中的AI翻译服务，Enter快速提问",
+            qa_top, text="用当前 AI 服务回答 · Enter 发送",
             font=self.f_small, text_color=FAINT,
         ).pack(side="right")
         qa_bar = ctk.CTkFrame(qa, fg_color="transparent")
@@ -2243,7 +1725,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             side="left"
         )
         ctk.CTkLabel(
-            dic_top, text="使用翻译设置中的AI翻译服务，Enter快速查询",
+            dic_top, text="用当前 AI 服务查词 · Enter 查询",
             font=self.f_small, text_color=FAINT,
         ).pack(side="right")
         dic_bar = ctk.CTkFrame(dic, fg_color="transparent")
@@ -2276,21 +1758,27 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         run = self._card(height=110)
         run.pack_propagate(False)
         self.progress = ctk.CTkProgressBar(
-            run, height=8, corner_radius=4, fg_color=BAR_BG, progress_color=CLAY
+            run, height=8, corner_radius=4, fg_color=BAR_BG, progress_color=BAR_BG
         )
         self.progress.set(0)
         self.progress.pack(fill="x", padx=14, pady=(14, 6))
+        status_row = ctk.CTkFrame(run, fg_color="transparent")
+        status_row.pack(fill="x", padx=14, pady=(0, 4))
         self.status_label = ctk.CTkLabel(
-            run, text="就绪", font=self.f_small, text_color=SLATE
+            status_row, text="就绪", font=self.f_small, text_color=SLATE
         )
-        self.status_label.pack(anchor="w", padx=14, pady=(0, 4))
+        self.status_label.pack(side="left")
+        self.service_hint = ctk.CTkLabel(
+            status_row, text="", font=self.f_small, text_color=FAINT
+        )
+        self.service_hint.pack(side="right")
 
         btns = ctk.CTkFrame(run, fg_color="transparent", height=42)
         btns.pack(fill="x", padx=10, pady=(0, 12))
         btns.pack_propagate(False)
         self.start_btn = ctk.CTkButton(
             btns, text="开始翻译", width=150, height=38, command=self._start,
-            font=self.f_btn, corner_radius=8,
+            font=self.f_btn, corner_radius=8, cursor="hand2",
             fg_color=CLAY, hover_color=CLAY_DK, text_color=WHITE,
             text_color_disabled="#EFD9CE",
         )
@@ -2329,6 +1817,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         qa.pack(fill="x", padx=PADX, pady=12)
         dic.pack(fill="x", padx=PADX, pady=12)
         self._bind_setting_persistence()
+        self._on_proxy_changed()
         self._show_tab("translate")
 
     def _bind_setting_persistence(self):
@@ -2342,11 +1831,22 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.notes_entry.bind("<FocusOut>", lambda _e: self._save_settings_prefs())
         self.out_entry.bind("<KeyRelease>", lambda _e: self._schedule_settings_prefs_save())
 
+    # ---------- self update (git when available, zip otherwise) ----------
     def _set_update_busy(self, busy: bool):
         try:
             self.update_btn.configure(
                 state="disabled" if busy else "normal",
-                text="↻  检查中..." if busy else "↻  检查更新",
+                text="↻  检查中…" if busy else self._update_btn_text,
+            )
+        except Exception:
+            pass
+
+    def _mark_update_available(self, available: bool):
+        self._update_btn_text = "↑  有新版本" if available else "↻  检查更新"
+        try:
+            self.update_btn.configure(
+                text=self._update_btn_text,
+                text_color=CLAY if available else FAINT,
             )
         except Exception:
             pass
@@ -2364,63 +1864,110 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             creationflags=creationflags,
         )
 
-    def _check_updates(self):
-        self._set_update_busy(True)
-        self._log("正在拉取 GitHub 仓库更新...")
-        threading.Thread(target=self._do_check_updates, daemon=True).start()
-
-    def _do_check_updates(self):
+    def _git_repo_branch(self):
+        """-> branch name when this install is a usable git checkout, else None."""
         try:
             inside = self._run_git(["rev-parse", "--is-inside-work-tree"], timeout=10)
-            if inside.returncode != 0 or inside.stdout.strip().lower() != "true":
-                self.after(0, lambda: self._finish_update_check(
-                    "当前目录不是 Git 仓库，无法自动更新。", warning=True
-                ))
-                return
+        except Exception:
+            return None
+        if inside.returncode != 0 or inside.stdout.strip().lower() != "true":
+            return None
+        try:
             branch = self._run_git(["branch", "--show-current"], timeout=10)
-            current_branch = (branch.stdout or "").strip() or "main"
-            fetch = self._run_git(["fetch", "--quiet", "origin", current_branch], timeout=60)
+        except Exception:
+            return None
+        return (branch.stdout or "").strip() or "main"
+
+    def _maybe_auto_check_updates(self):
+        """Quiet once-a-day check; never opens a dialog."""
+        if not self._prefs.get("auto_check_updates", True):
+            return
+        last = float(self._prefs.get("last_update_check", 0) or 0)
+        if time.time() - last < 24 * 3600:
+            return
+        self._prefs["last_update_check"] = time.time()
+        self._save_settings_prefs()
+        threading.Thread(
+            target=self._do_check_updates, args=(True,), daemon=True
+        ).start()
+
+    def _check_updates(self):
+        self._set_update_busy(True)
+        self._log("正在检查 GitHub 上的最新版本…")
+        threading.Thread(
+            target=self._do_check_updates, args=(False,), daemon=True
+        ).start()
+
+    def _do_check_updates(self, silent=False):
+        branch = self._git_repo_branch()
+        if branch:
+            self._check_updates_git(branch, silent)
+        else:
+            self._check_updates_zip(silent)
+
+    def _check_updates_git(self, branch, silent):
+        try:
+            fetch = self._run_git(["fetch", "--quiet", "origin", branch], timeout=60)
             if fetch.returncode != 0:
                 msg = (fetch.stderr or fetch.stdout or "git fetch 失败").strip()
-                self.after(0, lambda m=msg: self._finish_update_check(
-                    f"检查更新失败：{m}", error=True
-                ))
+                self._ui(self._finish_update_check, f"检查更新失败：{msg}",
+                         error=True, silent=silent)
                 return
-            local = self._run_git(["rev-parse", "HEAD"], timeout=10)
-            remote = self._run_git(["rev-parse", f"origin/{current_branch}"], timeout=10)
-            local_rev = (local.stdout or "").strip()
-            remote_rev = (remote.stdout or "").strip()
-            if not local_rev or not remote_rev:
-                self.after(0, lambda: self._finish_update_check(
-                    "无法读取本地或远端版本。", error=True
-                ))
+            local = (self._run_git(["rev-parse", "HEAD"], timeout=10).stdout or "").strip()
+            remote = (
+                self._run_git(["rev-parse", f"origin/{branch}"], timeout=10).stdout or ""
+            ).strip()
+            if not local or not remote:
+                self._ui(self._finish_update_check, "无法读取本地或远端版本。",
+                         error=True, silent=silent)
                 return
-            if local_rev == remote_rev:
-                self.after(0, lambda: self._finish_update_check("当前已经是最新版本。"))
+            if local == remote:
+                self._ui(self._mark_update_available, False)
+                self._ui(self._finish_update_check, "当前已经是最新版本。", silent=silent)
                 return
             ancestor = self._run_git(
-                ["merge-base", "--is-ancestor", "HEAD", f"origin/{current_branch}"],
-                timeout=10,
+                ["merge-base", "--is-ancestor", "HEAD", f"origin/{branch}"], timeout=10
             )
             if ancestor.returncode != 0:
-                self.after(0, lambda: self._finish_update_check(
-                    "远端版本与本地历史不完全一致，已取消自动更新。", warning=True
-                ))
+                self._ui(self._finish_update_check,
+                         "远端版本与本地历史不一致，已跳过自动更新。",
+                         warning=True, silent=silent)
                 return
             changes = self._run_git(
-                ["log", "--oneline", "--max-count=6", f"HEAD..origin/{current_branch}"],
+                ["log", "--oneline", "--max-count=6", f"HEAD..origin/{branch}"],
                 timeout=10,
             )
             summary = (changes.stdout or "").strip()
-            self.after(0, lambda s=summary, b=current_branch: self._prompt_update(s, b))
+            self._ui(self._prompt_update, summary, branch, "git", silent)
         except Exception as e:
-            self.after(0, lambda err=e: self._finish_update_check(
-                f"检查更新失败：{err}", error=True
-            ))
+            self._ui(self._finish_update_check, f"检查更新失败：{e}",
+                     error=True, silent=silent)
 
-    def _finish_update_check(self, message, warning=False, error=False):
+    def _check_updates_zip(self, silent):
+        """No git checkout: compare the recorded commit with GitHub's HEAD."""
+        try:
+            info = github_latest_commit("main")
+        except Exception as e:
+            self._ui(self._finish_update_check, f"检查更新失败：{e}",
+                     error=True, silent=silent)
+            return
+        remote = info.get("sha", "")
+        local = str(self._prefs.get("installed_sha") or "")
+        if remote and local and remote == local:
+            self._ui(self._mark_update_available, False)
+            self._ui(self._finish_update_check, "当前已经是最新版本。", silent=silent)
+            return
+        summary = info.get("message", "")
+        self._ui(self._prompt_update, summary, "main", "zip", silent)
+
+    def _ui(self, fn, *args, **kwargs):
+        self.after(0, lambda: fn(*args, **kwargs))
+
+    def _finish_update_check(self, message, warning=False, error=False, silent=False):
         self._set_update_busy(False)
         self._log(message)
+        if silent:
+            return
         if error:
             messagebox.showerror("检查更新", message, parent=self)
         elif warning:
@@ -2428,49 +1975,81 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         else:
             messagebox.showinfo("检查更新", message, parent=self)
 
-    def _prompt_update(self, summary, branch):
+    def _prompt_update(self, summary, branch, mode, silent=False):
         self._set_update_busy(False)
+        self._mark_update_available(True)
+        if silent:
+            self._log("GitHub 上有新版本，可在「翻译设置 → 有新版本」中更新。")
+            return
         detail = f"\n\n更新内容：\n{summary}" if summary else ""
+        note = "" if mode == "git" else "\n\n（当前不是 Git 安装，将下载压缩包覆盖更新）"
         ok = messagebox.askyesno(
             "发现新版本",
-            f"GitHub 上有新版本，是否立即更新？{detail}\n\n更新完成后重启 PDF Translator 生效。",
+            f"GitHub 上有新版本，是否立即更新？{detail}{note}"
+            f"\n\n更新完成后重启 PDF Translator 生效。",
             parent=self,
         )
         if not ok:
             self._log("已取消更新。")
             return
         self._set_update_busy(True)
-        self._log("正在从 GitHub 拉取最新版本...")
-        threading.Thread(target=self._do_apply_update, args=(branch,), daemon=True).start()
+        self._log("正在从 GitHub 获取最新版本…")
+        threading.Thread(
+            target=self._do_apply_update, args=(branch, mode), daemon=True
+        ).start()
 
-    def _do_apply_update(self, branch):
+    def _do_apply_update(self, branch, mode):
         try:
-            dirty = self._run_git(["status", "--porcelain"], timeout=10)
-            if dirty.returncode == 0 and (dirty.stdout or "").strip():
-                self.after(0, lambda: self._finish_update_check(
-                    "检测到本地有未提交改动，已取消自动更新。", warning=True
-                ))
-                return
-            pull = self._run_git(["pull", "--ff-only", "origin", branch], timeout=90)
-            if pull.returncode != 0:
-                msg = (pull.stderr or pull.stdout or "git pull 失败").strip()
-                self.after(0, lambda m=msg: self._finish_update_check(
-                    f"更新失败：{m}", error=True
-                ))
-                return
-            self.after(0, lambda: self._finish_update_check(
-                "更新完成。请重启 PDF Translator 以使用最新版本。"
-            ))
+            if mode == "git":
+                dirty = self._run_git(["status", "--porcelain"], timeout=10)
+                if dirty.returncode == 0 and (dirty.stdout or "").strip():
+                    self._ui(self._finish_update_check,
+                             "检测到本地有未提交改动，已取消自动更新。", warning=True)
+                    return
+                pull = self._run_git(["pull", "--ff-only", "origin", branch], timeout=120)
+                if pull.returncode != 0:
+                    msg = (pull.stderr or pull.stdout or "git pull 失败").strip()
+                    self._ui(self._finish_update_check, f"更新失败：{msg}", error=True)
+                    return
+            else:
+                count = download_and_extract(branch, Path(__file__).resolve().parent)
+                try:
+                    self._prefs["installed_sha"] = github_latest_commit(branch).get("sha", "")
+                except Exception:
+                    pass
+                self._ui(self._save_settings_prefs)
+                self._log(f"已覆盖 {count} 个文件。")
+            self._ui(self._mark_update_available, False)
+            self._ui(self._finish_update_check,
+                     "更新完成。请重启 PDF Translator 以使用最新版本。")
         except Exception as e:
-            self.after(0, lambda err=e: self._finish_update_check(
-                f"更新失败：{err}", error=True
-            ))
+            self._ui(self._finish_update_check, f"更新失败：{e}", error=True)
 
     def _get_notes_text(self):
         return self.notes_entry.get("1.0", "end").strip()
 
+    # ---------- network ----------
+    def _proxy_mode_key(self):
+        return PROXY_MODES.get(self.proxy_mode_var.get(), "system")
+
+    def _on_proxy_changed(self):
+        mode = self._proxy_mode_key()
+        url = self.proxy_entry.get().strip()
+        custom = mode == "custom"
+        try:
+            self.proxy_entry.configure(
+                state="normal" if custom else "disabled",
+                fg_color=WHITE if custom else IVORY,
+            )
+        except Exception:
+            pass
+        set_proxy_settings(mode, url)
+        self._schedule_settings_prefs_save()
+
     def _capture_settings_prefs(self):
         self._prefs.update({
+            "proxy_mode": self._proxy_mode_key(),
+            "proxy_url": self.proxy_entry.get().strip(),
             "service": self.service_var.get(),
             "lang_in": self.lang_in_var.get(),
             "lang_out": self.lang_out_var.get(),
@@ -2516,9 +2095,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         for tab_key, btn in self._tab_btns.items():
             selected = tab_key == key
             btn.configure(
-                fg_color=PAPER if selected else "transparent",
+                fg_color=WHITE if selected else "transparent",
                 text_color=INK if selected else SLATE,
-                hover_color=PAPER if selected else GHOST_H,
+                hover_color=WHITE if selected else GHOST_H,
+                font=self.f_tab_on if selected else self.f_body,
             )
         self._active_tab = key
 
@@ -3500,6 +3080,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         state = "disabled" if running else "normal"
         self.start_btn.configure(state=state)
         self.cancel_btn.configure(state="normal" if running else "disabled")
+        # an empty trough reads cleaner than a stray progress nub at 0
+        self.progress.configure(progress_color=CLAY if running else BAR_BG)
+        if running:
+            self.status_label.configure(text_color=SLATE)
 
     def _open_out(self):
         for d in self._out_dirs or {str(Path.cwd())}:
@@ -3514,11 +3098,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             "mono": (f"{filename}-mono.pdf", mono_bytes, "中文"),
             "dual": (f"{filename}-dual.pdf", dual_bytes, "双语"),
         }
-        keep_keys = {
-            "both": ("dual", "mono"),
-            "dual": ("dual",),
-            "mono": ("mono",),
-        }.get(output_mode, ("dual", "mono"))
+        keep_keys = select_outputs(output_mode)
 
         kept = []
         for key in keep_keys:
@@ -3662,9 +3242,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.dict_btn.configure(state="normal")
         elif kind == "all_done":
             self._set_running(False)
-            self.progress.set(1 if self._out_dirs else 0)
+            done = 1 if self._out_dirs else 0
+            self.progress.set(done)
+            self.progress.configure(progress_color=COLOR_OK if done else BAR_BG)
             self.status_label.configure(
-                text="已完成" if not self._cancel.is_set() else "已取消"
+                text="已完成" if not self._cancel.is_set() else "已取消",
+                text_color=COLOR_OK if done and not self._cancel.is_set() else SLATE,
             )
 
     def _log(self, msg):

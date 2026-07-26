@@ -9,5 +9,9 @@
   "thread": "8",
   "ignore_cache": false,
   "out_mode": "same",
-  "out_dir": ""
+  "out_dir": "",
+  "proxy_mode": "system",
+  "proxy_url": "",
+  "max_tokens": 4096,
+  "auto_check_updates": true
 }
