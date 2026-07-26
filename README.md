@@ -13,11 +13,14 @@
 - 快问快答：调用翻译设置中的 AI 服务，适合阅读文献时临时提问，支持 Markdown 渲染和最近对话上下文
 - 单词速查：调用所选 AI 服务即时查词，释义语言跟随「目标语言」，支持音标和领域释义，结果区支持 Markdown 渲染
 - 模型列表支持「获取可用模型」后通过右侧下拉选择；长列表会限高并滚动，不会自动覆盖输入框
+- **网络代理可配置**：跟随系统 / 直接连接 / 自定义，设置同时作用于 GUI 请求和 pdf2zh 翻译请求
+- **请求失败自动重试**：超时、429、5xx 会按指数退避重试，长文献不会因单次抖动整篇失败
+- **API Key 使用 Windows DPAPI 加密后落盘**，只有当前 Windows 账户能解密
 - Ctrl+滚轮 缩放整个界面（70%–160%），Ctrl+0 复原；自动记住缩放比例和窗口尺寸
-- 自动保存翻译服务、语言、输出模式、页码、线程、缓存、注意事项和输出目录等设置
+- 自动保存翻译服务、语言、输出模式、页码、线程、缓存、注意事项、代理和输出目录等设置
 - 支持 OpenAI 兼容、Claude/Anthropic 兼容、DeepSeek、Gemini、智谱、SiliconFlow、Grok、Groq、Ollama、Azure OpenAI 等服务
 - 支持 LongCat 这类 Anthropic-compatible `/messages` 网关
-- 翻译设置内可检查 GitHub 更新，并自动拉取最新版本
+- 翻译设置内可检查 GitHub 更新并自动拉取；每天静默检查一次，无 Git 环境时回落为下载压缩包更新
 - 自动创建桌面快捷方式
 - GUI 内管理翻译服务配置，API Key 只保存在本机用户配置目录
 
@@ -43,18 +46,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 
 安装脚本会：
 
-- 使用 `git clone` 将本仓库安装到 `%LOCALAPPDATA%\pdf2zh-gui`
+- 使用 `git clone` 将本仓库安装到 `%LOCALAPPDATA%\pdf2zh-gui`（已安装过则原地 `git pull`，保留虚拟环境）
+- 在安装目录下创建独立虚拟环境 `.venv`，依赖只装在这里，**不会污染系统 Python 或 conda 环境**
 - 安装 `requirements.txt` 中的 Python 依赖
-- 在桌面创建 `PDF Translator.lnk`
+- 在桌面创建 `PDF Translator.lnk`，指向 `.venv` 里的 `pythonw.exe`
 - 使用项目内置图标
 
 安装目录会保留完整 Git 仓库，因此 GUI 内的「检查更新」可以直接获取并拉取 GitHub 最新版本。
 
-如果你想指定 Python，可先设置：
+可选参数：
 
 ```powershell
+# 指定基础 Python
 $env:PDF2ZH_GUI_PYTHON="C:\Path\To\python.exe"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/YanRuiZhan/pdf2zh-gui/main/install.ps1 | iex"
+
+# 不建虚拟环境，直接装进当前 Python（不推荐）
+$env:PDF2ZH_GUI_NO_VENV="1"
 ```
 
 > 运行远程脚本前，建议先打开 `install.ps1` 检查内容。脚本不会读取、提交或上传你的 API Key。
@@ -77,15 +84,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 ```powershell
 git clone https://github.com/YanRuiZhan/pdf2zh-gui.git
 cd pdf2zh-gui
-python -m pip install -r requirements.txt
-python pdf2zh_gui.py
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\pythonw.exe pdf2zh_gui.py
 ```
 
-也可以双击：
-
-```text
-pdf_translator.bat
-```
+也可以双击 `pdf_translator.bat`，它会优先使用同目录下的 `.venv`。
 
 ## 配置翻译服务
 
@@ -107,9 +111,21 @@ LongCat / Claude 兼容服务可选：
 %USERPROFILE%\.config\PDFMathTranslate\gui_prefs.json
 ```
 
-`gui_services.json` 会包含你添加的服务地址、模型名和 API Key；`gui_prefs.json` 保存界面偏好和翻译设置。它们都是个人配置，不应提交到 GitHub。
+`gui_services.json` 保存你添加的服务地址、模型名和 API Key，其中 **API Key 会用 Windows DPAPI 加密**（形如 `enc:v1:...`），换电脑或换 Windows 账户后需要重新填写。`gui_prefs.json` 保存界面偏好和翻译设置。它们都是个人配置，不应提交到 GitHub。
 
-如果你的电脑上还有 `%USERPROFILE%\.config\PDFMathTranslate\config.json`，那是 pdf2zh 的旧配置文件，也可能包含密钥；本 GUI 不会把其中的旧服务直接显示在「翻译服务」下拉框中。
+如果你的电脑上还有 `%USERPROFILE%\.config\PDFMathTranslate\config.json`，那是 pdf2zh 的旧配置文件，也可能包含明文密钥；本 GUI 不会把其中的旧服务直接显示在「翻译服务」下拉框中。
+
+## 网络代理
+
+「翻译设置 → 网络代理」提供三种模式：
+
+| 模式 | 行为 |
+| --- | --- |
+| 跟随系统 | 使用 `HTTP_PROXY` / `HTTPS_PROXY` 等环境变量与系统代理设置（默认） |
+| 直接连接 | 本进程内清除代理环境变量，强制直连 |
+| 自定义 | 使用你填写的代理地址，例如 `http://127.0.0.1:7890` |
+
+设置会同时作用于 GUI 自己的请求（测试连接、获取模型、快问快答、单词速查）和 pdf2zh 的翻译请求。
 
 ## 默认设置
 
@@ -123,6 +139,8 @@ LongCat / Claude 兼容服务可选：
 - 并发线程：8
 - 翻译缓存：启用（不默认忽略缓存）
 - 界面缩放：90%
+- 网络代理：跟随系统
+- 单次翻译上限：4096 tokens
 - 默认不内置翻译服务，需要首次启动后手动添加
 - 默认注意事项：不翻译公式、参考文献、URL/DOI/邮箱，并保留英文人名、地名和常见专业术语缩写
 
@@ -137,16 +155,33 @@ LongCat / Claude 兼容服务可选：
 本项目在 GUI 启动翻译时会对 pdf2zh 做两个运行时兼容补丁：
 
 - 修复部分 PDF 渲染时 `PDFPageInterpreterEx.scs` 未初始化的问题
-- 对 Base URL 含 `/anthropic` 或 `anthropic.com` 的 OpenAI-like 服务，走 Anthropic `/messages` 请求，兼容 LongCat 等网关
+- 对 Base URL 含 `/anthropic` 或 `anthropic.com` 的 OpenAI-like 服务，走 Anthropic `/messages` 请求，兼容 LongCat 等网关（含失败重试）
 
 这些补丁只在本 GUI 进程内生效，不会修改你 Python 环境里的 site-packages 文件。
 
+## 开发
+
+核心逻辑与界面分离，`pdf2zh_core.py` 不依赖 tkinter，可以直接跑测试：
+
+```powershell
+python -m pip install pytest
+python -m pytest tests -q
+```
+
+CI（`.github/workflows/ci.yml`）会在 Ubuntu 与 Windows、Python 3.11 / 3.12 上跑字节码编译和这套测试。
+
 ## 文件
 
-- `pdf2zh_gui.py`：主程序
+- `pdf2zh_gui.py`：GUI 主程序
+- `pdf2zh_core.py`：无界面核心（服务定义、HTTP、代理、配置、提示词、运行时补丁）
+- `tests/`：核心逻辑单元测试
 - `pdf_translator.bat`：本地启动脚本
 - `install.ps1`：Windows 一键安装脚本
 - `requirements.txt`：依赖列表
 - `default_gui_prefs.json`：默认 GUI 偏好设置，不包含 API Key 或服务地址
 - `star.ico` / `star.png`：窗口标题栏图标
 - `pdf_translate_icon_full.ico` / `pdf_translate_icon_full.png`：桌面快捷方式图标
+
+## 许可证
+
+[MIT](LICENSE)
