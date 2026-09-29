@@ -24,8 +24,12 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install --upgrade pip pytest
 
-      - name: Byte-compile the GUI
-        run: python -m compileall -q pdf2zh_gui.py pdf2zh_core.py
+      - name: Byte-compile the GUI and installers
+        run: python -m compileall -q pdf2zh_gui.py pdf2zh_core.py scripts
+
+      - name: Validate shell launchers
+        shell: bash
+        run: bash -n install.sh run_pdf2zh.sh
 
       - name: Run core tests
         run: python -m pytest tests -q

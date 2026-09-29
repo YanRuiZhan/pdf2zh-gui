@@ -13,7 +13,7 @@ from pathlib import Path
 from string import Template
 from urllib.parse import urlsplit
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
@@ -730,8 +730,7 @@ def save_profiles(profiles: list):
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     try:  # best effort: keep the file readable only by the current user
-        if os.name == "nt":
-            os.chmod(GUI_SERVICES_PATH, 0o600)
+        os.chmod(GUI_SERVICES_PATH, 0o600)
     except Exception:
         pass
 

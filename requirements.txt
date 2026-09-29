@@ -6,3 +6,9 @@ httpx>=0.27
 requests>=2.31
 openai>=1.30
 Pillow>=10.0
+# Keep one cv2 provider. install_dependencies.py removes RapidOCR's full wheel
+# after pip resolves the upstream dependency graph.
+opencv-python-headless>=4.10.0.84
+# pdf2zh 1.9.11 imports legacy TextTranslate* classes removed by newer TMT wheels.
+tencentcloud-sdk-python-tmt==3.1.121
+tencentcloud-sdk-python-common==3.1.121

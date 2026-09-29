@@ -193,7 +193,7 @@ else {
 
 Write-Host "安装依赖（首次约需几分钟）..."
 & $runtimePython -m pip install --upgrade pip --quiet
-& $runtimePython -m pip install -r (Join-Path $InstallDir "requirements.txt")
+& $runtimePython (Join-Path $InstallDir "scripts\install_dependencies.py")
 if ($LASTEXITCODE -ne 0) { throw "依赖安装失败。" }
 
 $shortcut = New-DesktopShortcut -InstallPath $InstallDir -PythonExe $runtimePython
