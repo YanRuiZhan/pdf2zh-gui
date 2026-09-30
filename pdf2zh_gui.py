@@ -29,7 +29,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tkinter.font as tkfont
 import tkinter as tk
 import customtkinter as ctk
-from customtkinter.windows.widgets.core_rendering.draw_engine import DrawEngine
 from tkinter import filedialog, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
@@ -70,7 +69,6 @@ from pdf2zh_core import (
 TITLE_ICON_PATH = Path(__file__).with_name("star.ico")
 TITLE_ICON_PNG_PATH = Path(__file__).with_name("star.png")
 APP_ICON_PATH = Path(__file__).with_name("pdf_translate_icon_full.ico")
-APP_ICON_PNG_PATH = Path(__file__).with_name("pdf_translate_icon_full.png")
 TITLE_TEXT_GAP = "\u00A0\u00A0"
 GEOMETRY_PREF_VERSION = 4
 MD_RULE_CHAR = "─"
@@ -123,35 +121,10 @@ def is_legacy_startup_min_geometry(geometry: str, prefs: dict) -> bool:
     return (width <= 640 and height <= 520) or height <= 580
 
 
-def _read_xft_dpi_scale() -> float:
-    """Read Xft DPI because CustomTkinter does not detect HiDPI on Linux."""
-    if not sys.platform.startswith("linux"):
-        return 1.0
-    try:
-        result = subprocess.run(
-            ["xrdb", "-query"], capture_output=True, text=True,
-            timeout=2, check=False,
-        )
-        match = re.search(r"(?im)^Xft\.dpi:\s*([0-9.]+)", result.stdout)
-        if match:
-            return min(2.5, max(1.0, float(match.group(1)) / 96.0))
-    except Exception:
-        pass
-    return 1.0
-
-
 def set_window_icon(window, set_default=False):
-    # Linux desktop shells use the Tk photo as the running-window icon.  The
-    # Windows title-bar star is a theme detail and can be mistaken for another
-    # Tk application in the dock, so use the PDF translator artwork on Linux.
-    png_path = (
-        TITLE_ICON_PNG_PATH
-        if sys.platform.startswith("win")
-        else APP_ICON_PNG_PATH
-    )
-    if png_path.exists():
+    if TITLE_ICON_PNG_PATH.exists():
         try:
-            photo = tk.PhotoImage(file=str(png_path))
+            photo = tk.PhotoImage(file=str(TITLE_ICON_PNG_PATH))
             refs = getattr(window, "_title_icon_refs", [])
             refs.append(photo)
             window._title_icon_refs = refs
@@ -442,14 +415,7 @@ class ScrollDropdown:
 
     def open(self, x, y, width):
         self.close()
-        # Xft font DPI can be larger than the Tk widget-scale factor on Linux.
-        # Keep each candidate row tall enough for the actual CJK font metrics;
-        # a fixed 30 px row clips glyphs when Xft.dpi is 120/144.
-        try:
-            font_line_h = tkfont.Font(font=self.font).metrics("linespace")
-            row_h = max(30, int(font_line_h) + 8)
-        except Exception:
-            row_h = 30
+        row_h = 30
         row_px = self._px(row_h)
         row_gap = 2
         chrome_px = self._px(14) + 8
@@ -622,11 +588,7 @@ class PrettyOptionMenu(ctk.CTkFrame):
         # CTkLabel (unlike CTkButton) has no 140px default that breaks narrow menus
         self._arrow = ctk.CTkLabel(
             self, text="▾", width=16, fg_color=WHITE, text_color=FAINT,
-            font=ctk.CTkFont(
-                size=max(1, round(
-                    13 / getattr(self.winfo_toplevel(), "_xft_dpi_scale", 1.0)
-                ))
-            ),
+            font=ctk.CTkFont(size=13),
         )
         self._arrow.pack(side="right", padx=(2, 9), pady=1)
         self._text = ctk.CTkLabel(
@@ -768,7 +730,7 @@ class ServiceDialog(ctk.CTkToplevel):
             self.geometry("520x600")
         self.minsize(520, 480)
         self.transient(master)
-        self._grab_dialog()
+        self.grab_set()
         self.bind("<Configure>", self._schedule_geometry_save, add="+")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -822,27 +784,6 @@ class ServiceDialog(ctk.CTkToplevel):
 
     def _set_icon_safe(self):
         set_window_icon(self)
-
-    def _grab_dialog(self, attempt=0):
-        """Take the modal grab once the toplevel is actually viewable.
-
-        grab_set() raises TclError("grab failed: window not viewable") when the
-        window has not been mapped yet — the WM restacks a fresh transient
-        before mapping it, so calling it straight from __init__ is a race we
-        lose often enough to matter. Losing it used to abort __init__ before a
-        single widget was built, leaving an empty ivory window. Retry a few
-        times instead, and never let the grab failure be fatal.
-        """
-        try:
-            if not self.winfo_exists():
-                return
-            if self.winfo_viewable():
-                self.grab_set()
-                return
-        except Exception:
-            pass
-        if attempt < 50:
-            self.after(20, lambda: self._grab_dialog(attempt + 1))
 
     def _schedule_geometry_save(self, event=None):
         if event is not None and event.widget is not self:
@@ -1092,27 +1033,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         prefs = load_prefs()
         saved_scale = float(prefs.get("ui_scale", 1.0) or 1.0)
         saved_scale = min(1.6, max(0.7, round(saved_scale, 2)))
-        self._xft_dpi_scale = _read_xft_dpi_scale()
-        if sys.platform.startswith("linux") and self._xft_dpi_scale > 1.01:
-            # CustomTkinter's font-glyph corner shapes are rasterized at Xft
-            # DPI but clipped to Tk canvas coordinates; on HiDPI this turns
-            # radio/check candidates into solid squares. Canvas ovals keep
-            # their geometry aligned with the scaled controls.
-            DrawEngine.preferred_drawing_method = "circle_shapes"
-        self._layout_dpi_scale = min(
-            2.5,
-            max(1.0, float(os.environ.get(
-                "PDF2ZH_LAYOUT_SCALE", self._xft_dpi_scale
-            ))),
-        )
-        # Linux Tk fonts follow Xft DPI, but CustomTkinter leaves widget and
-        # window geometry at 100%. Scale geometry to the same HiDPI factor and
-        # compensate base font sizes below, keeping text at its current size.
-        ctk.set_window_scaling(self._layout_dpi_scale)
-        ctk.set_widget_scaling(saved_scale * self._layout_dpi_scale)
-        # Set the app class at Tcl/Tk creation time so GNOME groups the live
-        # window with our pdf2zh.desktop launcher instead of a generic Tk app.
-        super().__init__(fg_color=IVORY, className="pdf2zh")
+        ctk.set_widget_scaling(saved_scale)
+        super().__init__(fg_color=IVORY)
         self.TkdndVersion = TkinterDnD._require(self)
 
         self.title(f"{TITLE_TEXT_GAP}PDF Translator")
@@ -1168,30 +1090,21 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             return next((f for f in prefs if f in fams), fallback)
 
         # CJK-aware UI fonts: prefer modern faces if installed, else YaHei
-        ui = pick(
-            "MiSans", "HarmonyOS Sans SC", "OPPO Sans", "Sarasa UI SC",
-            "LXGW WenKai", "霞鹜文楷", "Noto Sans CJK SC", "Noto Sans SC",
-            fallback="Noto Sans CJK SC",
-        )
-        serif = pick(
-            "LXGW WenKai", "霞鹜文楷", "Source Han Serif SC", "思源宋体",
-            "Noto Serif CJK SC", "Noto Serif SC", "华文中宋",
-            fallback="Noto Sans CJK SC",
-        )
-        mono = pick(
-            "Sarasa Mono SC", "Noto Sans Mono CJK SC", "Cascadia Code",
-            "JetBrains Mono", "Fira Code", fallback="Noto Sans CJK SC",
-        )
+        ui = pick("MiSans", "HarmonyOS Sans SC", "OPPO Sans", "Sarasa UI SC",
+                  "LXGW WenKai", "霞鹜文楷", "Noto Sans SC")
+        serif = pick("LXGW WenKai", "霞鹜文楷", "Source Han Serif SC",
+                     "思源宋体", "Noto Serif SC", "华文中宋", fallback="华文楷体")
+        mono = pick("Sarasa Mono SC", "Cascadia Code", "JetBrains Mono",
+                    "Fira Code", fallback="Consolas")
 
-        font_size = lambda value: max(1, round(value / self._xft_dpi_scale))
-        self.f_body = ctk.CTkFont(family=ui, size=font_size(13))
-        self.f_small = ctk.CTkFont(family=ui, size=font_size(11))
-        self.f_section = ctk.CTkFont(family=ui, size=font_size(12), weight="bold")
-        self.f_tab_on = ctk.CTkFont(family=ui, size=font_size(13), weight="bold")
-        self.f_btn = ctk.CTkFont(family=ui, size=font_size(14), weight="bold")
-        self.f_title = ctk.CTkFont(family=serif, size=font_size(26), weight="bold")
-        self.f_sub = ctk.CTkFont(family=serif, size=font_size(12))
-        self.f_mono = ctk.CTkFont(family=mono, size=font_size(11))
+        self.f_body = ctk.CTkFont(family=ui, size=13)
+        self.f_small = ctk.CTkFont(family=ui, size=11)
+        self.f_section = ctk.CTkFont(family=ui, size=12, weight="bold")
+        self.f_tab_on = ctk.CTkFont(family=ui, size=13, weight="bold")
+        self.f_btn = ctk.CTkFont(family=ui, size=14, weight="bold")
+        self.f_title = ctk.CTkFont(family=serif, size=26, weight="bold")
+        self.f_sub = ctk.CTkFont(family=serif, size=12)
+        self.f_mono = ctk.CTkFont(family=mono, size=11)
 
         self._profiles = load_profiles()
         logging.basicConfig(level=logging.INFO)
@@ -1263,7 +1176,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.update_idletasks()      # paint the curtain first
         self._is_scaling = True
         try:
-            ctk.set_widget_scaling(self._ui_scale * self._layout_dpi_scale)
+            ctk.set_widget_scaling(self._ui_scale)
             self.update_idletasks()
             if hasattr(self, "qa_box"):
                 self._configure_qa_markdown_tags(
@@ -2192,11 +2105,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     # ---------- quick Q&A ----------
     def _qa_font(self, size=13, weight="normal", family=None):
         scale = getattr(self, "_ui_scale", 1.0) or 1.0
-        dpi_scale = getattr(self, "_xft_dpi_scale", 1.0) or 1.0
         base_family = family or self.f_body.cget("family")
         return (
             base_family,
-            max(1, int(round(size * scale / dpi_scale))),
+            max(1, int(round(size * scale))),
             weight,
         )
 
@@ -3176,11 +3088,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _open_out(self):
         for d in self._out_dirs or {str(Path.cwd())}:
             try:
-                if sys.platform.startswith("win"):
-                    os.startfile(d)
-                else:
-                    subprocess.Popen(["xdg-open", d])
-            except (OSError, FileNotFoundError):
+                os.startfile(d)
+            except OSError:
                 self._log(f"无法打开目录：{d}")
 
     @staticmethod

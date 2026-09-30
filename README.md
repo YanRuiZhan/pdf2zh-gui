@@ -1,6 +1,6 @@
 # pdf2zh-gui
 
-一个基于 [pdf2zh](https://github.com/Byaidu/PDFMathTranslate) 的 Windows / Linux 桌面 GUI（应用名：PDF Translator），用来把英文 PDF 文献翻译成中文并输出双语 PDF / 纯译文 PDF。
+一个基于 [pdf2zh](https://github.com/Byaidu/PDFMathTranslate) 的 Windows 桌面 GUI（应用名：PDF Translator），用来把英文 PDF 文献翻译成中文并输出双语 PDF / 纯译文 PDF。
 
 项目重点是双击即用：不需要启动 Web 服务，也不需要浏览器页面。
 
@@ -15,7 +15,7 @@
 - 模型列表支持「获取可用模型」后通过右侧下拉选择；长列表会限高并滚动，不会自动覆盖输入框
 - **网络代理可配置**：跟随系统 / 直接连接 / 自定义，设置同时作用于 GUI 请求和 pdf2zh 翻译请求
 - **请求失败自动重试**：超时、429、5xx 会按指数退避重试，长文献不会因单次抖动整篇失败
-- **API Key 在 Windows 使用 DPAPI 加密，在 Linux 使用仅当前用户可读的配置文件权限保存**
+- **API Key 使用 Windows DPAPI 加密后落盘**，只有当前 Windows 账户能解密
 - Ctrl+滚轮 缩放整个界面（70%–160%），Ctrl+0 复原；自动记住缩放比例和窗口尺寸
 - 自动保存翻译服务、语言、输出模式、页码、线程、缓存、注意事项、代理和输出目录等设置
 - 支持 OpenAI 兼容、Claude/Anthropic 兼容、DeepSeek、Gemini、智谱、SiliconFlow、Grok、Groq、Ollama、Azure OpenAI 等服务
@@ -34,41 +34,7 @@
 
 ![翻译设置](docs/screenshots/translation-settings.png)
 
-## Linux 一键安装
-
-需要 Python 3.11+、Git、Tk。Ubuntu 22.04 可以先安装系统组件：
-
-```bash
-sudo apt install git python3-tk python3-venv
-```
-
-然后运行安装脚本：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/YanRuiZhan/pdf2zh-gui/main/install.sh | bash
-```
-
-安装脚本会：
-
-- 将仓库安装到 `~/.local/share/pdf2zh-gui`，后续运行时保留独立虚拟环境
-- 安装 Python 依赖，并清理 RapidOCR 间接带来的 `opencv-python`，最终只保留 `opencv-python-headless`
-- 写入 `~/.local/share/applications/pdf2zh.desktop`
-- 如果存在 `~/Desktop`，同时创建桌面启动器
-
-Ubuntu 22.04 默认 Python 版本低于项目要求时，可以指定 Conda 或其他 Python 3.11+：
-
-```bash
-PDF2ZH_GUI_PYTHON="$HOME/miniforge3/envs/pdf2zh-gui/bin/python" \
-  bash install.sh
-```
-
-也可以自定义安装目录：
-
-```bash
-PDF2ZH_GUI_INSTALL_DIR="$HOME/Applications/pdf2zh-gui" bash install.sh
-```
-
-## Windows 一键安装
+## 一键安装
 
 需要已安装 Python 3.11+ 和 [Git for Windows](https://git-scm.com/download/win)，并确保 `git` 命令已加入 PATH。
 
@@ -82,7 +48,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 
 - 使用 `git clone` 将本仓库安装到 `%LOCALAPPDATA%\pdf2zh-gui`（已安装过则原地 `git pull`，保留虚拟环境）
 - 在安装目录下创建独立虚拟环境 `.venv`，依赖只装在这里，**不会污染系统 Python 或 conda 环境**
-- 安装 `requirements.txt` 中的 Python 依赖，并清理重复的 OpenCV 发行版
+- 安装 `requirements.txt` 中的 Python 依赖
 - 在桌面创建 `PDF Translator.lnk`，指向 `.venv` 里的 `pythonw.exe`
 - 使用项目内置图标
 
@@ -119,23 +85,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 git clone https://github.com/YanRuiZhan/pdf2zh-gui.git
 cd pdf2zh-gui
 python -m venv .venv
-.\.venv\Scripts\python.exe scripts\install_dependencies.py
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\pythonw.exe pdf2zh_gui.py
 ```
 
 也可以双击 `pdf_translator.bat`，它会优先使用同目录下的 `.venv`。
-
-Linux：
-
-```bash
-git clone https://github.com/YanRuiZhan/pdf2zh-gui.git
-cd pdf2zh-gui
-python3.11 -m venv .venv
-.venv/bin/python scripts/install_dependencies.py
-./run_pdf2zh.sh
-```
-
-如果使用已有的本地环境，可设置 `PDF2ZH_GUI_PYTHON` 后直接运行 `./run_pdf2zh.sh`。
 
 ## 配置翻译服务
 
@@ -152,11 +106,12 @@ LongCat / Claude 兼容服务可选：
 
 本软件的配置保存在本机：
 
-Windows：`%USERPROFILE%\.config\PDFMathTranslate\gui_services.json` 和 `%USERPROFILE%\.config\PDFMathTranslate\gui_prefs.json`
+```text
+%USERPROFILE%\.config\PDFMathTranslate\gui_services.json
+%USERPROFILE%\.config\PDFMathTranslate\gui_prefs.json
+```
 
-Linux：`~/.config/PDFMathTranslate/gui_services.json` 和 `~/.config/PDFMathTranslate/gui_prefs.json`
-
-`gui_services.json` 保存你添加的服务地址、模型名和 API Key。Windows 上 API Key 会用 DPAPI 加密（形如 `enc:v1:...`），换电脑或换 Windows 账户后需要重新填写；Linux 上文件权限会限制为当前用户可读写。`gui_prefs.json` 保存界面偏好和翻译设置。它们都是个人配置，不应提交到 GitHub。
+`gui_services.json` 保存你添加的服务地址、模型名和 API Key，其中 **API Key 会用 Windows DPAPI 加密**（形如 `enc:v1:...`），换电脑或换 Windows 账户后需要重新填写。`gui_prefs.json` 保存界面偏好和翻译设置。它们都是个人配置，不应提交到 GitHub。
 
 如果你的电脑上还有 `%USERPROFILE%\.config\PDFMathTranslate\config.json`，那是 pdf2zh 的旧配置文件，也可能包含明文密钥；本 GUI 不会把其中的旧服务直接显示在「翻译服务」下拉框中。
 
@@ -183,7 +138,7 @@ Linux：`~/.config/PDFMathTranslate/gui_services.json` 和 `~/.config/PDFMathTra
 - 输出文件：仅双语
 - 并发线程：8
 - 翻译缓存：启用（不默认忽略缓存）
-- 界面缩放：100%
+- 界面缩放：90%
 - 网络代理：跟随系统
 - 单次翻译上限：4096 tokens
 - 默认不内置翻译服务，需要首次启动后手动添加
@@ -196,10 +151,6 @@ Linux：`~/.config/PDFMathTranslate/gui_services.json` 和 `~/.config/PDFMathTra
 - **单词速查**：在「单词速查」卡片输入单词或短语并按 Enter，即用当前选中的 ★ AI 服务返回词典式释义；释义、说明和例句翻译会使用「翻译设置」中选择的目标语言。需要先配置一个自定义 AI 服务。
 
 ## 说明
-
-### OpenCV 依赖
-
-`pdf2zh` / BabelDOC 声明 `opencv-python-headless`，RapidOCR 当前又间接声明 `opencv-python`。两个发行版都会安装同名的 `cv2` 模块，不能同时保留。Windows 和 Linux 安装脚本都会先让 pip 完成依赖解析，再卸载全部 OpenCV 发行版并只重装 `opencv-python-headless`。手动安装时请运行 `scripts/install_dependencies.py`，不要直接用 `pip install -r requirements.txt`。
 
 本项目在 GUI 启动翻译时会对 pdf2zh 做两个运行时兼容补丁：
 
@@ -226,9 +177,6 @@ CI（`.github/workflows/ci.yml`）会在 Ubuntu 与 Windows、Python 3.11 / 3.12
 - `tests/`：核心逻辑单元测试
 - `pdf_translator.bat`：本地启动脚本
 - `install.ps1`：Windows 一键安装脚本
-- `install.sh`：Linux 一键安装脚本
-- `scripts/install_dependencies.py`：安装依赖并清理重复 OpenCV 发行版
-- `run_pdf2zh.sh`：Linux 启动脚本
 - `requirements.txt`：依赖列表
 - `default_gui_prefs.json`：默认 GUI 偏好设置，不包含 API Key 或服务地址
 - `star.ico` / `star.png`：窗口标题栏图标
