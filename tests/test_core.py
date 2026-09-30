@@ -127,6 +127,35 @@ def test_extract_message_anthropic_blocks():
     assert core.extract_message(data) == "ab"
 
 
+@pytest.mark.parametrize("data,expected", [
+    (
+        {"choices": [
+            {"message": {"content": ""}, "finish_reason": "length"},
+            {"message": {"content": "second choice"}},
+        ]},
+        "second choice",
+    ),
+    (
+        {"choices": [{"message": {"content": [
+            {"type": "text", "text": "block "},
+            {"type": "text", "text": "content"},
+        ]}}]},
+        "block content",
+    ),
+    ({"output_text": "Responses API text"}, "Responses API text"),
+    (
+        {"candidates": [{"content": {"parts": [{"text": "Gemini text"}]}}]},
+        "Gemini text",
+    ),
+    (
+        {"choices": [], "data": {"choices": [{"message": {"content": "wrapped"}}]}},
+        "wrapped",
+    ),
+])
+def test_extract_message_compatible_response_shapes(data, expected):
+    assert core.extract_message(data) == expected
+
+
 def test_extract_message_ollama():
     assert core.extract_message({"message": {"content": "ok"}}) == "ok"
 

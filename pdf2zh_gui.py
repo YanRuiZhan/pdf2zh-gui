@@ -1138,7 +1138,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             startup_geometry = f"{default_w}x{default_h}+{x}+24"
         self._startup_geometry = startup_geometry
         self.geometry(startup_geometry)
-        self.minsize(620, 430)
+        self.minsize(760, 430)
 
         self._q = queue.Queue()
         self._files: dict[str, dict] = {}  # path -> {row,status}
@@ -1204,6 +1204,15 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Ctrl+wheel zoom (debounced: a full re-scale costs ~0.4s)
         self.bind_all("<Control-MouseWheel>", self._on_ctrl_wheel)
+        # Tk/X11 reports wheel movement as Button-4/5 rather than MouseWheel.
+        self.bind_all(
+            "<Control-Button-4>",
+            lambda event: self._on_ctrl_wheel(event, direction=1),
+        )
+        self.bind_all(
+            "<Control-Button-5>",
+            lambda event: self._on_ctrl_wheel(event, direction=-1),
+        )
         self.bind_all("<Control-Key-0>", self._reset_scale)
         self.bind("<Configure>", self._schedule_geometry_save, add="+")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1215,8 +1224,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.after_idle(self._show_startup_window)
 
     # ---------- zoom (Ctrl+wheel) ----------
-    def _on_ctrl_wheel(self, event):
-        step = 0.1 if event.delta > 0 else -0.1
+    def _on_ctrl_wheel(self, event, direction=None):
+        if direction is None:
+            delta = getattr(event, "delta", 0)
+            if delta:
+                direction = 1 if delta > 0 else -1
+            else:
+                direction = 1 if getattr(event, "num", None) == 4 else -1
+        step = 0.1 * direction
         self._pending_scale = min(1.6, max(0.7, round(self._pending_scale + step, 2)))
         self._schedule_scale()
         return "break"
@@ -1831,7 +1846,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.dict_btn.configure(height=32)
         self.dict_btn.pack(side="left", padx=(8, 0))
         self.dict_box = StableScrollbarTextbox(
-            dic, height=255, state="disabled", wrap="word",
+            dic, height=291, state="disabled", wrap="word",
             fg_color=WHITE, text_color=FAINT, font=self.f_body,
             corner_radius=10, border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
@@ -1878,13 +1893,13 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.open_btn.pack(side="left", padx=6)
 
         self.log_box = StableScrollbarTextbox(
-            self.page, height=106, state="disabled", wrap="word",
+            self.page, height=124, state="disabled", wrap="word",
             fg_color=WHITE, text_color=SLATE, font=self.f_mono,
             corner_radius=10, border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
         )
         self.settings_log_box = StableScrollbarTextbox(
-            self._tab_pages["settings"], height=106, state="disabled", wrap="word",
+            self._tab_pages["settings"], height=124, state="disabled", wrap="word",
             fg_color=WHITE, text_color=SLATE, font=self.f_mono,
             corner_radius=10, border_width=1, border_color=LINE,
             scrollbar_button_color="#D8D3C6", scrollbar_button_hover_color="#C6BFAF",
