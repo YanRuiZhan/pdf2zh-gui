@@ -13,7 +13,7 @@ from pathlib import Path
 from string import Template
 from urllib.parse import urlsplit
 
-__version__ = "1.2.1"
+__version__ = "1.2.0"
 
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
@@ -338,111 +338,25 @@ def is_anthropic_style(stype: str, base: str) -> bool:
     )
 
 
-def _text_content(value) -> str:
-    """Extract visible text from common string, block-list, and nested payloads."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        chunks = []
-        for part in value:
-            if isinstance(part, str):
-                chunks.append(part)
-            elif isinstance(part, dict):
-                text = _text_content(part.get("text"))
-                if not text:
-                    text = _text_content(part.get("output_text"))
-                if not text:
-                    text = _text_content(part.get("content"))
-                if text:
-                    chunks.append(text)
-        return "".join(chunks)
-    if isinstance(value, dict):
-        for key in ("text", "output_text", "content", "parts"):
-            text = _text_content(value.get(key))
-            if text:
-                return text
-    return ""
-
-
 def extract_message(data) -> str:
-    """Pull visible assistant text from common OpenAI, Anthropic, Gemini, and Ollama responses."""
+    """Pull assistant text out of an OpenAI / Anthropic / Ollama response."""
     if not isinstance(data, dict):
         return ""
-
-    # OpenAI Chat Completions. Some gateways prepend an empty choice or return
-    # content as typed text blocks, so inspect every choice and keep looking.
-    choices = data.get("choices")
-    if isinstance(choices, list):
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            message = choice.get("message") or {}
-            if isinstance(message, dict):
-                text = _text_content(message.get("content"))
-                if not text:
-                    text = _text_content(message.get("output_text"))
-                if text:
-                    return text.strip()
-            text = _text_content(choice.get("text"))
-            if text:
-                return text.strip()
-
-    # OpenAI Responses API and Anthropic Messages API.
-    for key in ("output_text", "content", "output"):
-        text = _text_content(data.get(key))
-        if text:
-            return text.strip()
-
-    # Gemini GenerateContent API.
-    candidates = data.get("candidates")
-    if isinstance(candidates, list):
-        for candidate in candidates:
-            if isinstance(candidate, dict):
-                text = _text_content(candidate.get("content"))
-                if text:
-                    return text.strip()
-
-    # Ollama chat and completion APIs.
+    if "choices" in data:
+        choice = (data.get("choices") or [{}])[0] or {}
+        message = choice.get("message") or {}
+        return str(message.get("content") or choice.get("text") or "").strip()
+    parts = data.get("content")
+    if isinstance(parts, str):
+        return parts.strip()
+    if isinstance(parts, list):
+        return "".join(
+            p.get("text", "") if isinstance(p, dict) else str(p) for p in parts
+        ).strip()
     message = data.get("message")
-    if isinstance(message, dict):
-        text = _text_content(message.get("content"))
-        if text:
-            return text.strip()
-    text = _text_content(data.get("response"))
-    if text:
-        return text.strip()
-
-    # A few compatible gateways wrap their result in a data object.
-    wrapped = data.get("data")
-    if isinstance(wrapped, dict):
-        return extract_message(wrapped)
-    return _text_content(wrapped)
-
-
-def _response_finish_reason(data) -> str:
-    """Get a finish reason from an OpenAI-compatible response, if present."""
-    reason = ""
-    if isinstance(data, dict):
-        choices = data.get("choices")
-        if isinstance(choices, list):
-            reason = next((
-                str(choice.get("finish_reason"))
-                for choice in choices
-                if isinstance(choice, dict) and choice.get("finish_reason")
-            ), "")
-    return reason
-
-
-def _empty_response_hint(data) -> str:
-    """Explain a successful HTTP response that contains no visible text."""
-    reason = _response_finish_reason(data)
-    detail = f"（finish_reason={reason}）" if reason else ""
-    if reason == "length":
-        detail += "，模型可能耗尽了输出 token 上限"
-    return (
-        "接口返回成功，但响应中没有可显示的文本内容"
-        f"{detail}。请检查所选模型是否支持文本对话及其返回格式。"
-    )
+    if isinstance(message, dict):  # ollama
+        return str(message.get("content") or "").strip()
+    return ""
 
 
 def _sleep_backoff(attempt: int):
@@ -473,7 +387,6 @@ def chat(
     base, headers = _api_target(stype, envs)
     envs = envs or {}
     last_error: Exception | None = None
-    length_retry_used = False
 
     for attempt in range(max(0, retries) + 1):
         try:
@@ -548,24 +461,7 @@ def chat(
                     continue
                 if resp.status_code >= 400:
                     raise ValueError(f"HTTP {resp.status_code}：{resp.text[:160]}")
-                response_data = resp.json()
-                text = extract_message(response_data)
-                if not text:
-                    if (
-                        _response_finish_reason(response_data) == "length"
-                        and not length_retry_used
-                        and attempt < retries
-                    ):
-                        # Reasoning models can spend the whole completion
-                        # budget before emitting a visible answer. Retry once
-                        # with more room instead of making the user resubmit.
-                        expanded_max_tokens = min(max_tokens * 2, 8192)
-                        if expanded_max_tokens > max_tokens:
-                            max_tokens = expanded_max_tokens
-                            length_retry_used = True
-                            continue
-                    raise ValueError(_empty_response_hint(response_data))
-                return text
+                return extract_message(resp.json())
         except httpx.TimeoutException as exc:
             last_error = TimeoutError(_network_hint(timeout))
             if attempt >= retries:
@@ -658,8 +554,7 @@ def quick_translate(stype: str, envs: dict, model: str, text: str,
     )
     return chat(
         stype, envs, model, [{"role": "user", "content": ask}],
-        # Reasoning models may spend part of the output budget internally.
-        max_tokens=1400, temperature=0, timeout=timeout,
+        max_tokens=700, temperature=0, timeout=timeout,
     )
 
 
